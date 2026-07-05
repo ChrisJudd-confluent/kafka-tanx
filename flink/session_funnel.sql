@@ -1,8 +1,12 @@
 -- Games started vs. reaching ACTIVE vs. COMPLETE vs. ABANDONED, per 5-minute
--- tumbling window. Source: kafkatanx-sessions (run 00_watermarks.sql first).
+-- tumbling window. Source: kafkatanx-sessions (run add_event_time_sessions.sql and set_watermark_sessions.sql first).
 -- Sink: kafkatanx-agg-session-funnel (schema: schemas/SessionFunnelAgg.avsc).
+-- Applied via terraform/flink.tf (confluent_flink_statement.session_funnel).
 
+-- Explicit column list: the sink table has an auto-inferred leading `key`
+-- column (these topics have no key schema) that our SELECT doesn't produce.
 INSERT INTO `kafkatanx-agg-session-funnel`
+  (window_start, window_end, sessions_started, sessions_active, sessions_completed, sessions_abandoned)
 SELECT
   CAST(window_start AS STRING) AS window_start,
   CAST(window_end   AS STRING) AS window_end,
