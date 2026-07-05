@@ -1,4 +1,4 @@
--- Games started vs. reaching ACTIVE vs. COMPLETE vs. ABANDONED, per 5-minute
+-- Games started vs. reaching ACTIVE vs. COMPLETE vs. ABANDONED, per 1-hour
 -- tumbling window. Source: kafkatanx-sessions (run add_event_time_sessions.sql and set_watermark_sessions.sql first).
 -- Sink: kafkatanx-agg-session-funnel (schema: schemas/SessionFunnelAgg.avsc).
 -- Applied via terraform/flink.tf (confluent_flink_statement.session_funnel).
@@ -15,6 +15,6 @@ SELECT
   CAST(COUNT(*) FILTER (WHERE status = 'COMPLETE')  AS BIGINT) AS sessions_completed,
   CAST(COUNT(*) FILTER (WHERE status = 'ABANDONED') AS BIGINT) AS sessions_abandoned
 FROM TABLE(
-  TUMBLE(TABLE `kafkatanx-sessions`, DESCRIPTOR(event_time), INTERVAL '5' MINUTES)
+  TUMBLE(TABLE `kafkatanx-sessions`, DESCRIPTOR(event_time), INTERVAL '1' HOUR)
 )
 GROUP BY window_start, window_end;

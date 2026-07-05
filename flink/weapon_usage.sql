@@ -1,4 +1,4 @@
--- Shot count by weapon type, per 5-minute tumbling window — which weapon
+-- Shot count by weapon type, per 1-hour tumbling window — which weapon
 -- gets fired the most (expect NORMAL to dominate; it's the default/free one).
 -- Source: kafkatanx-shots (run add_event_time_shots.sql and set_watermark_shots.sql first).
 -- Sink: kafkatanx-agg-weapon-usage (schema: schemas/WeaponUsageAgg.avsc).
@@ -14,6 +14,6 @@ SELECT
   weapon,
   CAST(COUNT(*) AS BIGINT) AS shots_fired
 FROM TABLE(
-  TUMBLE(TABLE `kafkatanx-shots`, DESCRIPTOR(event_time), INTERVAL '5' MINUTES)
+  TUMBLE(TABLE `kafkatanx-shots`, DESCRIPTOR(event_time), INTERVAL '1' HOUR)
 )
 GROUP BY window_start, window_end, weapon;

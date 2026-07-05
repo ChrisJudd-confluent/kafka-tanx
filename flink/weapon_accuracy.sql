@@ -1,4 +1,4 @@
--- Hit rate by weapon type, per 5-minute tumbling window — which weapon is
+-- Hit rate by weapon type, per 1-hour tumbling window — which weapon is
 -- actually landing shots, not just being fired the most.
 -- Source: kafkatanx-shots (run add_event_time_shots.sql and set_watermark_shots.sql first).
 -- Sink: kafkatanx-agg-weapon-accuracy (schema: schemas/WeaponAccuracyAgg.avsc).
@@ -16,6 +16,6 @@ SELECT
   CAST(COUNT(*) FILTER (WHERE hit) AS BIGINT) AS hits,
   CAST(COUNT(*) FILTER (WHERE hit) AS DOUBLE) / COUNT(*) AS accuracy_pct
 FROM TABLE(
-  TUMBLE(TABLE `kafkatanx-shots`, DESCRIPTOR(event_time), INTERVAL '5' MINUTES)
+  TUMBLE(TABLE `kafkatanx-shots`, DESCRIPTOR(event_time), INTERVAL '1' HOUR)
 )
 GROUP BY window_start, window_end, weapon;
