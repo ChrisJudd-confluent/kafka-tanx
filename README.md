@@ -18,23 +18,79 @@ analytics using **Confluent Flink SQL**.
 
 Instead of connecting directly to each other over TCP, both players connect to a
 shared Confluent Cloud cluster. Game traffic flows through the
-`kafkatanx-gameplay` topic (keyed by game code) and analytics events are written
-to separate topics for Flink to process.
+`kafkatanx-gameplay` topic (keyed by game code); the HOST alone writes session
+lifecycle and analytics events, which a Flink SQL pipeline rolls up into
+derived "data product" topics.
 
-```
-Player 1 (HOST)              Confluent Cloud              Player 2 (CLIENT)
-────────────────             ───────────────              ─────────────────
-HOST generates code  ──►  kafkatanx-sessions  ◄──  CLIENT enters code
-Both subscribe       ──►  kafkatanx-gameplay  ◄──  Both subscribe
-MATCH_START/ROUND_START ──►                   ──►  receive & apply
-TURN_ACTION          ──►                   ◄──     TURN_ACTION
-TURN_RESULT          ──►                   ──►     receive & snap
+```mermaid
+flowchart TB
+    subgraph P1["Player 1 — HOST"]
+        direction TB
+        H1["kafkatanx.cpp<br/>game loop"]
+        H2["KafkaNet<br/>kafka_net.cpp"]
+        H1 <--> H2
+    end
 
-[HOST only — after each shot]
-ShotEvent  ──►  kafkatanx-shots   ──►  Flink
-RoundEvent ──►  kafkatanx-rounds  ──►  Flink
-GameEvent  ──►  kafkatanx-games   ──►  Flink  ──►  leaderboard / dashboards
+    subgraph P2["Player 2 — CLIENT"]
+        direction TB
+        C1["kafkatanx.cpp<br/>game loop"]
+        C2["KafkaNet<br/>kafka_net.cpp"]
+        C1 <--> C2
+    end
+
+    subgraph CC["Confluent Cloud"]
+        direction TB
+
+        subgraph Live["Live gameplay topics"]
+            direction TB
+            T_SESS[("kafkatanx-sessions<br/>compacted · WAITING / ACTIVE / COMPLETE / ABANDONED")]
+            T_PLAY[("kafkatanx-players<br/>compacted · player identity")]
+            T_GAME[("kafkatanx-gameplay<br/>MATCH_START · TURN_ACTION · TURN_RESULT · PING")]
+        end
+
+        subgraph Analytics["Analytics source topics — HOST-only writes"]
+            direction TB
+            T_SHOT[("kafkatanx-shots")]
+            T_RND[("kafkatanx-rounds")]
+            T_GAMES[("kafkatanx-games")]
+        end
+
+        FLINK{{"Flink SQL compute pool<br/>terraform/flink.tf + flink/*.sql"}}
+
+        subgraph DataProducts["Data products — 1-hour tumbling windows"]
+            direction TB
+            AGG1[("kafkatanx-agg-session-funnel<br/>started / active / completed / abandoned")]
+            AGG2[("kafkatanx-agg-weapon-usage<br/>shots fired per weapon")]
+            AGG3[("kafkatanx-agg-weapon-accuracy<br/>hit rate per weapon")]
+        end
+
+        T_SESS -. watermark + window .-> FLINK
+        T_SHOT -. watermark + window .-> FLINK
+        FLINK --> AGG1
+        FLINK --> AGG2
+        FLINK --> AGG3
+    end
+
+    H2 -- "produce: session lifecycle" --> T_SESS
+    H2 <-->|"produce + consume"| T_GAME
+    C2 <-->|"produce + consume"| T_GAME
+    H2 -- produce --> T_PLAY
+    C2 -- produce --> T_PLAY
+    H2 -- "produce: after each shot / round / match" --> T_SHOT
+    H2 --> T_RND
+    H2 --> T_GAMES
 ```
+
+Notes on the diagram:
+- `kafkatanx-sessions` is write-only from the app's side — nothing in-game
+  consumes it, it exists purely as a Flink source for the session-funnel data
+  product.
+- `PING` is a transport-only heartbeat (see [kafkatanx.cpp](kafkatanx.cpp)) used
+  to detect a peer going silent mid-match; it isn't part of the registered
+  Avro schema and carries no payload.
+- The three `kafkatanx-agg-*` topics, the Flink compute pool, and the SQL
+  statements that populate them are all provisioned by `terraform apply`
+  (`terraform/flink.tf`) — see [flink/](flink/) for the SQL itself.
 
 ---
 
@@ -93,10 +149,10 @@ On first launch the game will prompt you for a display name and write it to
 
 ## Playing over the internet
 
-1. **HOST:** launch the game → click **ONLINE** → **HOST GAME**.
+1. **HOST:** launch the game → click **NETWORK** → **HOST GAME**.
    A 6-character game code (e.g. `TIGER7`) is displayed on screen.
 2. **HOST:** share the code with your opponent via any channel (Discord, text, etc.)
-3. **CLIENT:** launch the game → click **ONLINE** → **JOIN GAME** → type the code → press Enter.
+3. **CLIENT:** launch the game → click **NETWORK** → **JOIN GAME** → type the code → press Enter.
 4. The match starts automatically once both players are connected.
 
 No IP addresses. No port forwarding. Works from any network.
