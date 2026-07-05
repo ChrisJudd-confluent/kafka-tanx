@@ -1,0 +1,10 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is gitignored — never commit real credentials.
+
+# From cloud.confluent.io → API Keys → Create cloud API key (not a Kafka key)
+confluent_cloud_api_key    = "REPLACE_WITH_CLOUD_API_KEY"
+confluent_cloud_api_secret = "REPLACE_WITH_CLOUD_API_SECRET"
+
+# Visible in the Confluent Cloud URL when you click into your environment:
+# https://confluent.cloud/environments/env-xxxxxx/...
+environment_id = "env-REPLACE"
