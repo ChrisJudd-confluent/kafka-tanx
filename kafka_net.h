@@ -139,6 +139,7 @@ public:
     bool PublishSessionWaiting(const std::string& gameCode);
     bool PublishSessionActive(const std::string& gameCode);
     bool PublishSessionComplete(const std::string& gameCode);
+    bool PublishSessionAbandoned(const std::string& gameCode);
 
     // Gameplay pipe (kafkatanx-gameplay) — direct replacement for TCP send/recv
     bool SendGameplay(const std::string& gameCode, int32_t msgType,

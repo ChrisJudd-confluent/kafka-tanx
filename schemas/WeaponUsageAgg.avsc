@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "WeaponUsageAgg",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "5-minute tumbling window rollup of shot counts by weapon type from kafkatanx-shots. Produced by the Flink SQL statement in flink/weapon_usage.sql.",
+  "fields": [
+    { "name": "window_start", "type": "string" },
+    { "name": "window_end",   "type": "string" },
+    { "name": "weapon",       "type": "string",
+      "doc": "One of: NORMAL, HE, CLUSTER, LASER" },
+    { "name": "shots_fired",  "type": "long" }
+  ]
+}

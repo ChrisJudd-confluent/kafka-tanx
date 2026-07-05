@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "SessionFunnelAgg",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "5-minute tumbling window rollup of kafkatanx-sessions lifecycle events. Produced by the Flink SQL statement in flink/session_funnel.sql.",
+  "fields": [
+    { "name": "window_start", "type": "string",
+      "doc": "Window start timestamp, e.g. '2026-07-05 12:30:00.000'" },
+    { "name": "window_end",   "type": "string" },
+    { "name": "sessions_started",   "type": "long",
+      "doc": "Count of WAITING events in this window (games a host initiated)" },
+    { "name": "sessions_active",     "type": "long",
+      "doc": "Count of ACTIVE events in this window (games that got a client to join)" },
+    { "name": "sessions_completed", "type": "long",
+      "doc": "Count of COMPLETE events in this window (games finished normally)" },
+    { "name": "sessions_abandoned", "type": "long",
+      "doc": "Count of ABANDONED events in this window (host cancelled before the match started)" }
+  ]
+}

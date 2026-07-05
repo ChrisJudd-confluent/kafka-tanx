@@ -3128,6 +3128,10 @@ private:
 
         if (GetKey(olc::Key::ESCAPE).bPressed) {
             if (netEditingName) { netEditingName = false; return; }
+            // HOST cancelling out of the lobby before the match started means
+            // the session it announced (WAITING/ACTIVE) never reaches COMPLETE.
+            if (netMode == NetMode::HOST && !gameCode.empty())
+                kafkaNet.PublishSessionAbandoned(gameCode);
             NetClose();
             netReadyToStart = false; netNameSent = false;
             if (netMode == NetMode::NONE) { state = GameState::MENU; stateTimer = 0; }

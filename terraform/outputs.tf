@@ -81,3 +81,27 @@ output "client_ini_snippet" {
     game=${confluent_schema.games.schema_identifier}
   EOT
 }
+
+# ─── Flink ──────────────────────────────────────────────────────────────────
+# Used with the Confluent CLI to run the statements in ../flink/*.sql, e.g.:
+#   confluent flink statement create session-funnel \
+#     --sql "$(cat ../flink/session_funnel.sql)" \
+#     --compute-pool "$(terraform output -raw flink_compute_pool_id)" \
+#     --database lkc-9kkv5o7
+
+output "flink_compute_pool_id" {
+  description = "Flink compute pool ID — pass to `confluent flink statement create --compute-pool`"
+  value       = confluent_flink_compute_pool.analytics.id
+}
+
+output "flink_api_key" {
+  description = "Flink API key ID for the flink_runner service account"
+  value       = confluent_api_key.flink_runner.id
+  sensitive   = false
+}
+
+output "flink_api_secret" {
+  description = "Flink API secret — use with `confluent flink` commands or `confluent api-key use`"
+  value       = confluent_api_key.flink_runner.secret
+  sensitive   = true
+}

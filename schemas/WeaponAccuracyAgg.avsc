@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "WeaponAccuracyAgg",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "5-minute tumbling window rollup of hit rate by weapon type from kafkatanx-shots. Produced by the Flink SQL statement in flink/weapon_accuracy.sql.",
+  "fields": [
+    { "name": "window_start", "type": "string" },
+    { "name": "window_end",   "type": "string" },
+    { "name": "weapon",       "type": "string" },
+    { "name": "shots_fired",  "type": "long" },
+    { "name": "hits",         "type": "long" },
+    { "name": "accuracy_pct", "type": "double",
+      "doc": "hits / shots_fired for this weapon in this window" }
+  ]
+}

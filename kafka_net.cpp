@@ -337,6 +337,12 @@ bool KafkaNet::PublishSessionComplete(const std::string& gameCode) {
                           cfg_, gameCode, "COMPLETE");
 }
 
+bool KafkaNet::PublishSessionAbandoned(const std::string& gameCode) {
+    if (!producer_) return false;
+    return ProduceSession(static_cast<RdKafka::Producer*>(producer_),
+                          cfg_, gameCode, "ABANDONED");
+}
+
 // ---------------------------------------------------------------------------
 // Player identity (kafkatanx-players, compacted)
 // ---------------------------------------------------------------------------

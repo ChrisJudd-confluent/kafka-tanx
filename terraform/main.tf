@@ -152,6 +152,67 @@ resource "confluent_kafka_topic" "games" {
   }
 }
 
+# ─── Flink analytics output topics ──────────────────────────────────────────
+# 5-minute tumbling-window rollups produced by the Flink SQL statements in
+# flink/*.sql (see terraform/flink.tf for the compute pool that runs them).
+
+resource "confluent_kafka_topic" "agg_session_funnel" {
+  topic_name       = "kafkatanx-agg-session-funnel"
+  partitions_count = 6
+  rest_endpoint    = data.confluent_kafka_cluster.cluster.rest_endpoint
+
+  config = {
+    "cleanup.policy" = "delete"
+    "retention.ms"   = "${30 * 24 * 60 * 60 * 1000}"  # 30 days
+  }
+
+  kafka_cluster {
+    id = data.confluent_kafka_cluster.cluster.id
+  }
+  credentials {
+    key    = confluent_api_key.admin_kafka.id
+    secret = confluent_api_key.admin_kafka.secret
+  }
+}
+
+resource "confluent_kafka_topic" "agg_weapon_usage" {
+  topic_name       = "kafkatanx-agg-weapon-usage"
+  partitions_count = 6
+  rest_endpoint    = data.confluent_kafka_cluster.cluster.rest_endpoint
+
+  config = {
+    "cleanup.policy" = "delete"
+    "retention.ms"   = "${30 * 24 * 60 * 60 * 1000}"
+  }
+
+  kafka_cluster {
+    id = data.confluent_kafka_cluster.cluster.id
+  }
+  credentials {
+    key    = confluent_api_key.admin_kafka.id
+    secret = confluent_api_key.admin_kafka.secret
+  }
+}
+
+resource "confluent_kafka_topic" "agg_weapon_accuracy" {
+  topic_name       = "kafkatanx-agg-weapon-accuracy"
+  partitions_count = 6
+  rest_endpoint    = data.confluent_kafka_cluster.cluster.rest_endpoint
+
+  config = {
+    "cleanup.policy" = "delete"
+    "retention.ms"   = "${30 * 24 * 60 * 60 * 1000}"
+  }
+
+  kafka_cluster {
+    id = data.confluent_kafka_cluster.cluster.id
+  }
+  credentials {
+    key    = confluent_api_key.admin_kafka.id
+    secret = confluent_api_key.admin_kafka.secret
+  }
+}
+
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 # Schema files are read from ../schemas/ relative to this terraform/ dir.
 # The schema_registry_cluster REST endpoint is resolved from the data source.
@@ -235,6 +296,51 @@ resource "confluent_schema" "games" {
   subject_name = "kafkatanx-games-value"
   format       = "AVRO"
   schema       = file("${path.module}/../schemas/GameEvent.avsc")
+
+  schema_registry_cluster {
+    id = data.confluent_schema_registry_cluster.sr.id
+  }
+  rest_endpoint = data.confluent_schema_registry_cluster.sr.rest_endpoint
+  credentials {
+    key    = confluent_api_key.admin_sr.id
+    secret = confluent_api_key.admin_sr.secret
+  }
+}
+
+resource "confluent_schema" "agg_session_funnel" {
+  subject_name = "kafkatanx-agg-session-funnel-value"
+  format       = "AVRO"
+  schema       = file("${path.module}/../schemas/SessionFunnelAgg.avsc")
+
+  schema_registry_cluster {
+    id = data.confluent_schema_registry_cluster.sr.id
+  }
+  rest_endpoint = data.confluent_schema_registry_cluster.sr.rest_endpoint
+  credentials {
+    key    = confluent_api_key.admin_sr.id
+    secret = confluent_api_key.admin_sr.secret
+  }
+}
+
+resource "confluent_schema" "agg_weapon_usage" {
+  subject_name = "kafkatanx-agg-weapon-usage-value"
+  format       = "AVRO"
+  schema       = file("${path.module}/../schemas/WeaponUsageAgg.avsc")
+
+  schema_registry_cluster {
+    id = data.confluent_schema_registry_cluster.sr.id
+  }
+  rest_endpoint = data.confluent_schema_registry_cluster.sr.rest_endpoint
+  credentials {
+    key    = confluent_api_key.admin_sr.id
+    secret = confluent_api_key.admin_sr.secret
+  }
+}
+
+resource "confluent_schema" "agg_weapon_accuracy" {
+  subject_name = "kafkatanx-agg-weapon-accuracy-value"
+  format       = "AVRO"
+  schema       = file("${path.module}/../schemas/WeaponAccuracyAgg.avsc")
 
   schema_registry_cluster {
     id = data.confluent_schema_registry_cluster.sr.id
