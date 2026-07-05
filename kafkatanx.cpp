@@ -197,7 +197,7 @@ struct Pickup {
 
 class Tanx : public olc::PixelGameEngine {
 public:
-    Tanx() { sAppName = "TANX"; }
+    Tanx() { sAppName = "KafkaTanx!"; }
 
 private:
     // -- Terrain --
@@ -412,10 +412,6 @@ private:
 
     // -- Settings & menu --
     GameSettings settings;
-    int menuEditingName;        // -1=none, 0=editing P1 name, 1=editing P2 name
-    std::string menuNameBuffer;
-    std::string menuNameBeforeEdit; // fallback if the field is left empty on commit
-    float menuCursorBlink;
 
     // -- Active gameplay values (derived from settings each round) --
     float activeGravity;
@@ -806,7 +802,7 @@ private:
     }
 
     // Returns true when it is this machine's player's turn to act
-    bool IsLocalTurn() const { return netMode == NetMode::NONE || currentPlayer == localPlayer; }
+    bool IsLocalTurn() const { return currentPlayer == localPlayer; }
 
     // Mark the CLIENT as ready to receive the HOST's canonical state.
     // If a TURN_RESULT arrived early (mid-animation) it was buffered — flush it now.
@@ -1082,8 +1078,6 @@ private:
         repeatTimer = 0;
         mouseRepeatTimer = 0;
         frameTime = 0;
-        menuEditingName = -1;
-        menuCursorBlink = 0;
         activeGravity = 180.0f;
         activeWindMax = 10.0f;
         whistleSoundLoaded = false;
@@ -1525,8 +1519,9 @@ private:
         shotTargetHpAfter  = shotTargetHpBefore;
         shotCraterX = 0; shotCraterY = 0;
 
-        // In network mode, send the action so the remote fires simultaneously
-        if (netMode != NetMode::NONE && IsLocalTurn())
+        // Send the action so the remote fires simultaneously — but only when
+        // it's our own local player firing, not when mirroring the remote's shot.
+        if (IsLocalTurn())
             NetSendTurnAction(false, false);
 
         if (selectedWeapon == WeaponType::LASER) {
@@ -1859,46 +1854,12 @@ private:
         const int c3 = c2 + colW + colGap, c3w = SCREEN_W - margin - c3; // remainder
 
         // Title
-        DrawString(SCREEN_W / 2 - 112, 12, "T A N X", olc::Pixel(255, 200, 0), 4);
-
-        // ── Player name panels (full width, side by side) ───────────────────
-        int nameY = 62;
-        int nameH = 54;
-        int nameW = (SCREEN_W - margin * 2 - colGap) / 2;
-        for (int p = 0; p < 2; p++) {
-            int nx = margin + p * (nameW + colGap);
-            DrawWoodPanel(nx, nameY, nameW, nameH);
-            olc::Pixel lc = (p == 0) ? olc::Pixel(100,255,100) : olc::Pixel(255,100,100);
-            DrawString(nx + 10, nameY + 8, (p == 0) ? "Player 1:" : "Player 2:", lc);
-
-            int fx = nx + 100, fy = nameY + 26, fw = nameW - 112;
-            FillRect(fx, fy, fw, 18, olc::Pixel(20,15,10));
-            DrawRect(fx, fy, fw, 18, olc::Pixel(80,60,30));
-            if (menuEditingName == p) {
-                DrawRect(fx, fy, fw, 18, olc::Pixel(100,100,255));
-                std::string d = menuNameBuffer;
-                if (fmod(menuCursorBlink, 0.8f) < 0.4f) d += "_";
-                DrawString(fx + 4, fy + 5, d, olc::Pixel(100,200,255));
-            } else {
-                DrawString(fx + 4, fy + 5, settings.playerNames[p], olc::YELLOW);
-            }
-            if (GetMouse(0).bPressed) {
-                int mx = GetMouseX(), my = GetMouseY();
-                if (mx >= fx && mx < fx+fw && my >= fy && my < fy+18) {
-                    if (menuEditingName != -1 && menuEditingName != p) {
-                        settings.playerNames[menuEditingName] = menuNameBuffer.empty()
-                            ? menuNameBeforeEdit : menuNameBuffer;
-                    }
-                    menuEditingName = p;
-                    menuNameBeforeEdit = settings.playerNames[p];
-                    menuNameBuffer.clear();
-                    menuCursorBlink = 0;
-                }
-            }
-        }
+        DrawString(SCREEN_W / 2 - 160, 12, "KafkaTanx!", olc::Pixel(255, 200, 0), 4);
 
         // ── Three-column settings area ───────────────────────────────────────
-        const int settY = nameY + nameH + 12; // top of the three panels
+        // Player names are set per-role in the lobby (host/client each type
+        // their own), so there's no name entry on this screen.
+        const int settY = 62; // top of the three panels
 
         // ── Column 1: Wind / Landscape / Night Mode ──────────────────────────
         {
@@ -2016,13 +1977,11 @@ private:
             DrawString(ix+28, rowY+15, items[i].desc, olc::Pixel(170,170,170));
         }
 
-        // ── PLAY + NETWORK buttons ───────────────────────────────────────────
+        // ── NETWORK button ────────────────────────────────────────────────────
         int btnY = SCREEN_H - 62;
         int btnH = 48;
         int btnW = 180;
-        int btnX    = SCREEN_W / 2 - btnW - 16;
-        int netBtnX = SCREEN_W / 2 + 16;
-        float pulse = (sin(stateTimer * 3.0f) + 1.0f) * 0.5f;
+        int netBtnX = SCREEN_W / 2 - btnW / 2;
 
         auto drawBtn = [&](int bx, int by, int bw, int bh,
                            olc::Pixel top, olc::Pixel bot, olc::Pixel border) {
@@ -2036,63 +1995,14 @@ private:
             }
             DrawRect(bx,by,bw-1,bh-1,border);
         };
-        drawBtn(btnX, btnY, btnW, btnH,
-                olc::Pixel(180,50,20), olc::Pixel(110,25,10), olc::Pixel(220,100,60));
-        DrawString(btnX+32, btnY+14, "PLAY!", olc::Pixel(255,(int)(200+55*pulse),(int)(50*pulse)), 3);
-
         drawBtn(netBtnX, btnY, btnW, btnH,
                 olc::Pixel(30,80,160), olc::Pixel(15,45,100), olc::Pixel(60,140,220));
         DrawString(netBtnX+10, btnY+14, "NETWORK", olc::Pixel(150,220,255), 3);
 
         if (GetMouse(0).bPressed) {
             int mx=GetMouseX(), my=GetMouseY();
-            auto commit = [&]() {
-                if (menuEditingName >= 0) {
-                    settings.playerNames[menuEditingName] = menuNameBuffer.empty()
-                        ? menuNameBeforeEdit : menuNameBuffer;
-                    menuEditingName = -1;
-                }
-            };
-            if (mx>=btnX && mx<btnX+btnW && my>=btnY && my<btnY+btnH)
-                { commit(); StartNewMatch(); }
             if (mx>=netBtnX && mx<netBtnX+btnW && my>=btnY && my<btnY+btnH)
-                { commit(); netMode=NetMode::NONE; NetClose(); state=GameState::LOBBY; stateTimer=0; }
-        }
-    }
-
-    // Handle keyboard input while on the menu screen
-    void UpdateMenuInput(float fElapsedTime) {
-        menuCursorBlink += fElapsedTime;
-
-        if (menuEditingName >= 0) {
-            // Typing a player name
-            char letter = GetLetterPressed();
-            if (letter != '\0' && menuNameBuffer.length() < 16) {
-                menuNameBuffer += letter;
-            }
-            if (GetKey(olc::Key::SPACE).bPressed && menuNameBuffer.length() < 16) {
-                menuNameBuffer += ' ';
-            }
-            int digit = GetDigitPressed();
-            if (digit >= 0 && menuNameBuffer.length() < 16) {
-                menuNameBuffer += std::to_string(digit);
-            }
-            if (GetKey(olc::Key::BACK).bPressed && !menuNameBuffer.empty()) {
-                menuNameBuffer.pop_back();
-            }
-            if (GetKey(olc::Key::ENTER).bPressed || GetKey(olc::Key::RETURN).bPressed) {
-                settings.playerNames[menuEditingName] = menuNameBuffer.empty()
-                    ? menuNameBeforeEdit : menuNameBuffer;
-                menuEditingName = -1;
-            }
-            if (GetKey(olc::Key::ESCAPE).bPressed) {
-                menuEditingName = -1; // Cancel without saving
-            }
-        } else {
-            // Not editing a name — Enter/Return starts the game
-            if (GetKey(olc::Key::ENTER).bPressed || GetKey(olc::Key::RETURN).bPressed) {
-                StartNewMatch();
-            }
+                { netMode=NetMode::NONE; NetClose(); state=GameState::LOBBY; stateTimer=0; }
         }
     }
 
@@ -3006,7 +2916,7 @@ private:
 
     void DrawLobbyScreen() {
         DrawWoodPanel(0, 0, SCREEN_W, SCREEN_H);
-        DrawString(SCREEN_W / 2 - 112, 18, "T A N X", olc::Pixel(255, 200, 0), 4);
+        DrawString(SCREEN_W / 2 - 160, 18, "KafkaTanx!", olc::Pixel(255, 200, 0), 4);
         DrawString(SCREEN_W / 2 - 60, 70, "NETWORK GAME", olc::WHITE, 2);
 
         float pulse = (sin(stateTimer * 3.0f) + 1.0f) * 0.5f;
@@ -3142,7 +3052,7 @@ private:
     void DrawTitleScreen() {
         Clear(olc::BLACK);
 
-        DrawString(SCREEN_W / 2 - 80, 150, "T A N X", olc::Pixel(255, 200, 0), 5);
+        DrawString(SCREEN_W / 2 - 200, 150, "KafkaTanx!", olc::Pixel(255, 200, 0), 5);
         DrawString(SCREEN_W / 2 - 140, 250, "A Classic Artillery Game", olc::Pixel(180, 180, 180), 2);
 
         float pulse = (sin(stateTimer * 3.0f) + 1.0f) * 0.5f;
@@ -3217,7 +3127,6 @@ private:
         }
         if (state == GameState::MENU) {
             SetDrawTarget(nullptr);
-            UpdateMenuInput(fElapsedTime);
             DrawMenuScreen();
             return true;
         }
@@ -3243,7 +3152,7 @@ private:
         if (IsLocalTurn()) CheckPickupCollisions();
 
         // Poll for incoming network messages every frame during active gameplay
-        if (netMode != NetMode::NONE) NetUpdate();
+        NetUpdate();
 
         // While waiting for the host's TURN_RESULT we skip all state-machine
         // logic but still fall through to the render section below, so the
@@ -3314,9 +3223,7 @@ private:
                 if (GetKey(olc::Key::SPACE).bPressed)
                     Fire();  // Fire() sends TURN_ACTION in net mode (see below)
                 if (GetKey(olc::Key::ENTER).bPressed) {
-                    if (netMode == NetMode::NONE) {
-                        state = GameState::NEXT_TURN; stateTimer = 0;
-                    } else if (netMode == NetMode::HOST) {
+                    if (netMode == NetMode::HOST) {
                         NetSendTurnAction(true, false);
                         NetSendTurnResult();
                         state = GameState::NEXT_TURN; stateTimer = 0;
@@ -3526,18 +3433,10 @@ private:
                         ShowPickupMessage(settings.playerNames[currentPlayer] + "'s night vision fades!");
                 }
 
-                // Wind for the next turn:
-                // HOST already computed nextWind in NetSendTurnResult() and the CLIENT
-                // received it via TURN_RESULT — both machines use the same value.
-                // In network mode the local rand() call is skipped entirely.
-                if (netMode == NetMode::NONE) {
-                    if (activeWindMax > 0) {
-                        wind += ((rand() % 100) - 50) / 20.0f;
-                        wind = std::clamp(wind, -activeWindMax, activeWindMax);
-                    }
-                } else {
-                    wind = nextWind; // apply the synced value from TURN_RESULT
-                }
+                // Wind for the next turn: HOST already computed nextWind in
+                // NetSendTurnResult() and the CLIENT received it via TURN_RESULT —
+                // both machines apply the same synced value.
+                wind = nextWind;
 
                 // Stalemate check: if 30 turns pass with no hit, declare a draw
                 turnsSinceHit++;
@@ -3584,12 +3483,12 @@ private:
         DrawLaserBeam();
         DrawWindIndicator();
         // Night overlay drawn last so it sits on top of everything
-        DrawNightOverlay(netMode == NetMode::NONE ? currentPlayer : localPlayer);
+        DrawNightOverlay(localPlayer);
         DrawPickupMessage();
         DrawUI();
 
-        // Network: overlay "Waiting for..." when it's the remote player's turn or we're awaiting result
-        if (netMode != NetMode::NONE && (!IsLocalTurn() || waitForResult)) {
+        // Overlay "Waiting for..." when it's the remote player's turn or we're awaiting result
+        if (!IsLocalTurn() || waitForResult) {
             std::string msg = waitForResult
                 ? "Resolving turn..."
                 : "Waiting for " + settings.playerNames[currentPlayer] + "...";
@@ -3614,9 +3513,8 @@ private:
                         PublishGameAnalytics(PlayerIdForTank(winner), settings.playerNames[winner]);
                         kafkaNet.PublishSessionComplete(gameCode);
                     }
-                    if (netMode != NetMode::NONE) { NetSend(NetMsg::DISCONNECT, {}); NetClose(); netMode = NetMode::NONE; }
+                    NetSend(NetMsg::DISCONNECT, {}); NetClose(); netMode = NetMode::NONE;
                     state = GameState::MENU;
-                    menuEditingName = -1;
                     surrendered = false;
                     stateTimer = 0;
                 } else {
