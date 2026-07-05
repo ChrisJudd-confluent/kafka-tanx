@@ -134,6 +134,13 @@ public:
     void Shutdown();
     bool IsReady()    const { return ready_; }
     std::string LastError() const { return lastError_; }
+    // Returns and clears the last error — use this to surface each new error
+    // exactly once instead of re-displaying a stale one every frame.
+    std::string TakeError() {
+        std::string e = lastError_;
+        lastError_.clear();
+        return e;
+    }
 
     // Session management (kafkatanx-sessions)
     bool PublishSessionWaiting(const std::string& gameCode);
@@ -166,4 +173,11 @@ private:
     // in kafka_net.cpp. Kept void* here to avoid pulling rdkafka headers into game code.
     void* producer_ = nullptr;
     void* consumer_ = nullptr;
+    // Error-surfacing callbacks, same opaque-pointer treatment — cast to
+    // RdKafka::EventCb* / RdKafka::DeliveryReportCb* in kafka_net.cpp. Without
+    // these, connection/auth/delivery failures are only visible in librdkafka's
+    // own stderr logging, which a packaged binary with no attached terminal
+    // never shows anyone.
+    void* eventCb_    = nullptr;
+    void* deliveryCb_ = nullptr;
 };

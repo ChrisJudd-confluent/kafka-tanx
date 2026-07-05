@@ -45,6 +45,14 @@ enum class NetMsg : uint8_t {
     TURN_RESULT   = 3,  // host → client: canonical HP/shields/ammo/pickup/wind
     DISCONNECT    = 4,
     PLAYER_NAME   = 5,  // client → host: the client's chosen display name
+    // Not present in the currently-registered GameplayMessage.avsc enum —
+    // safe because AvroWriter/Reader hand-roll enums as plain integers with
+    // no validation against the schema's declared symbol list (avro_codec.h).
+    // Pure transport-layer liveness signal; carries no payload and needs no
+    // schema change to add. NetUpdate() resets the peer-silence timer on any
+    // accepted message regardless of type, so a PING keeps the connection
+    // "alive" during quiet stretches (e.g. someone taking a long time to aim).
+    PING          = 6,
 };
 
 // Helper: write/read primitives into a byte buffer
@@ -78,6 +86,11 @@ constexpr int BARREL_LENGTH = 16;
 constexpr int MAX_POWER = 100;
 // startingHP and moveBudget are now configurable in GameSettings below
 
+// Liveness: send a PING this often; declare the peer gone if nothing at all
+// (game traffic or PING) has arrived for this long.
+constexpr float NET_HEARTBEAT_INTERVAL_S = 5.0f;
+constexpr float NET_DISCONNECT_TIMEOUT_S = 15.0f;
+
 // --- Game state machine -----------------------------------------------------
 // TITLE -> MENU -> AIM <-> FIRING -> EXPLOSION -> NEXT_TURN -> AIM ...
 // When a tank is destroyed: -> GAME_OVER -> MENU (match over) or AIM (next round)
@@ -91,7 +104,8 @@ enum class GameState {
     EXPLOSION,
     LASER_FIRE, // Instant beam weapon animating
     NEXT_TURN,
-    GAME_OVER
+    GAME_OVER,
+    DISCONNECTED // Peer went silent past NET_DISCONNECT_TIMEOUT_S; auto-returns to MENU
 };
 
 // --- Input mode for typed angle/power entry ---------------------------------
@@ -289,6 +303,12 @@ private:
     bool          netReadyToStart = false;       // host: true once client name received
     bool          netNameSent = false;           // client: has name been sent to host yet?
     float         netLobbyBlink = 0;
+    int64_t       netLastRemoteSeq = -1;         // highest KafkaMsg::sequence accepted from the peer this session
+    float         netPeerSilence = 0;            // seconds since any message (game traffic or PING) arrived from the peer
+    float         netHeartbeatTimer = 0;         // seconds since we last sent a PING
+    bool          netDisconnected = false;       // set by NetUpdate() when the peer times out; consumed by OnUserUpdate
+    std::string   netError;                      // current error banner text, empty = none
+    float         netErrorTimer = 0;             // auto-clears netError when this reaches 0
 
     // -- Analytics (HOST only) --
     WeaponType    lastFiredWeapon = WeaponType::NORMAL; // snapshot before Fire()/FireLaser() reset it
@@ -737,33 +757,66 @@ private:
     // All multi-byte integers are sent in network byte order (big-endian).
     // =========================================================================
 
+    // Sets the error banner shown near the NETWORK button / lobby / HUD.
+    // Auto-clears after a few seconds so a transient blip doesn't stick around.
+    void SetNetError(const std::string& msg) {
+        netError = msg;
+        netErrorTimer = 6.0f;
+    }
+
     // Publish one message on kafkatanx-gameplay for the active session.
     // Direct replacement for the old TCP send() — framing and transport are
     // now owned by KafkaNet/Avro instead of a hand-rolled 4-byte header.
     void NetSend(NetMsg type, const std::vector<uint8_t>& payload) {
         if (gameCode.empty()) return;
-        kafkaNet.SendGameplay(gameCode, (int32_t)type, payload);
+        if (!kafkaNet.SendGameplay(gameCode, (int32_t)type, payload)) {
+            std::string e = kafkaNet.TakeError();
+            SetNetError(e.empty() ? "Failed to send network message." : e);
+        }
     }
 
     // Called every frame during the lobby and active gameplay.
     // Drains every message currently available on the session's Kafka consumer
     // (bounded, so a backlog can't stall a frame) and dispatches each one to
     // NetHandleMessage() — this replaces the old recvBuf stream-parsing loop.
+    // Also sends a periodic PING and tracks how long the peer has been silent,
+    // setting netDisconnected when NET_DISCONNECT_TIMEOUT_S is exceeded — the
+    // caller (OnUserUpdate) is responsible for reacting to that flag.
     void NetUpdate() {
         if (gameCode.empty()) return;
+
+        netHeartbeatTimer += frameTime;
+        if (netHeartbeatTimer >= NET_HEARTBEAT_INTERVAL_S) {
+            netHeartbeatTimer = 0;
+            NetSend(NetMsg::PING, {});
+        }
 
         KafkaMsg msg;
         int guard = 0;
         while (guard++ < 64 && kafkaNet.PollGameplay(msg, /*timeoutMs=*/0)) {
             if (msg.gameCode != gameCode) continue;                    // not our session
             if (msg.senderPlayerId == kafkaConfig.playerId) continue;  // our own echo
+            if (msg.sequence <= netLastRemoteSeq) continue;            // duplicate/stale redelivery
+            netLastRemoteSeq = msg.sequence;
 
-            // First message we see from the opponent means they're present —
-            // there's no TCP handshake to detect this via anymore.
+            // Any message at all from the opponent (including a PING) means
+            // they're present — there's no TCP handshake to detect this via anymore.
             netConnected = true;
             remotePlayerId = msg.senderPlayerId;
+            netPeerSilence = 0;
 
-            NetHandleMessage((NetMsg)msg.messageType, msg.payload);
+            if ((NetMsg)msg.messageType != NetMsg::PING)
+                NetHandleMessage((NetMsg)msg.messageType, msg.payload);
+        }
+
+        if (netConnected) {
+            netPeerSilence += frameTime;
+            if (netPeerSilence >= NET_DISCONNECT_TIMEOUT_S) {
+                if (netMode == NetMode::HOST) kafkaNet.PublishSessionAbandoned(gameCode);
+                NetClose();
+                netMode = NetMode::NONE;
+                netDisconnected = true; // caller transitions to GameState::DISCONNECTED
+            }
         }
     }
 
@@ -772,29 +825,44 @@ private:
         netConnected = false;
         gameCode.clear();
         remotePlayerId.clear();
+        netLastRemoteSeq = -1;
+        netPeerSilence = 0;
+        netHeartbeatTimer = 0;
     }
 
     // HOST: generate a game code, announce the session as WAITING, and
     // subscribe to the gameplay topic. Sets localPlayer = 0 (HOST is always P1).
     bool NetStartHost() {
-        if (!kafkaNet.IsReady()) return false;
+        if (!kafkaNet.IsReady()) {
+            SetNetError("Not connected to Confluent Cloud — check client-kafka.ini and your network.");
+            return false;
+        }
         gameCode = KafkaConfig::GenerateGameCode();
         kafkaNet.PublishPlayerProfile();
         kafkaNet.PublishSessionWaiting(gameCode);
         kafkaNet.SubscribeGameplay(gameCode, kafkaConfig.playerId);
         localPlayer = 0;
+        netLastRemoteSeq = -1;
+        netPeerSilence = 0;
+        netHeartbeatTimer = 0;
         return true;
     }
 
     // CLIENT: join an existing session by its game code, subscribe, and send
     // our display name immediately. Sets localPlayer = 1 (CLIENT is always P2).
     bool NetJoinGame(const std::string& code) {
-        if (!kafkaNet.IsReady() || code.empty()) return false;
+        if (!kafkaNet.IsReady() || code.empty()) {
+            SetNetError("Not connected to Confluent Cloud — check client-kafka.ini and your network.");
+            return false;
+        }
         gameCode = code;
         kafkaNet.PublishPlayerProfile();
         kafkaNet.SubscribeGameplay(gameCode, kafkaConfig.playerId);
         localPlayer = 1;
         netConnected = true; // optimistic — no handshake to wait for
+        netLastRemoteSeq = -1;
+        netPeerSilence = 0;
+        netHeartbeatTimer = 0;
         NetBuf b; b.writeStr(settings.playerNames[1]);
         NetSend(NetMsg::PLAYER_NAME, b.data);
         netNameSent = true;
@@ -1068,7 +1136,8 @@ private:
             kafkaConfig.GeneratePlayerId();
             kafkaConfig.SaveToFile("client-kafka.ini");
         }
-        kafkaNet.Init(kafkaConfig);
+        if (!kafkaNet.Init(kafkaConfig))
+            SetNetError("Failed to initialize Kafka: " + kafkaNet.TakeError());
         roundNumber = 0;
         tanks[0].score = 0;
         tanks[1].score = 0;
@@ -2004,6 +2073,11 @@ private:
             if (mx>=netBtnX && mx<netBtnX+btnW && my>=btnY && my<btnY+btnH)
                 { netMode=NetMode::NONE; NetClose(); state=GameState::LOBBY; stateTimer=0; }
         }
+
+        if (!kafkaNet.IsReady())
+            DrawString(netBtnX - 40, btnY + btnH + 6, "Not connected to Confluent Cloud",
+                olc::Pixel(255, 140, 140));
+        DrawNetErrorBanner();
     }
 
     // =========================================================================
@@ -2467,8 +2541,8 @@ private:
         olc::Pixel valCol = olc::YELLOW;
         int scale = 2;
 
-        // Player name header (uses settings name instead of just "P1")
-        std::string playerStr = settings.playerNames[currentPlayer] + ", YOUR SHOT";
+        // Turn header — reflects whether it's this machine's player acting or the remote's
+        std::string playerStr = IsLocalTurn() ? "Your Shot!" : "Opponent Shot!";
         int headerX = SCREEN_W / 2 - (int)(playerStr.length() * 4 * scale);
         headerX = std::max(4, headerX);
         DrawString(headerX, 8, playerStr,
@@ -3012,6 +3086,7 @@ private:
                 DrawString(SCREEN_W/2 - 100, 390, "Waiting for host to start...", olc::Pixel(180,180,180));
             }
         }
+        DrawNetErrorBanner();
     }
 
     // Lobby keyboard input — handles both the name field and the game-code field
@@ -3062,6 +3137,28 @@ private:
 
         DrawString(SCREEN_W / 2 - 100, 450, "Inspired by TANX (1991)", olc::Pixel(120, 120, 120));
         DrawString(SCREEN_W / 2 - 68, 470, "by Gary Roberts", olc::Pixel(120, 120, 120));
+    }
+
+    // Small banner for netError — call from any screen where a Kafka failure
+    // (connection, send, schema mismatch) should be visible to the player
+    // instead of silently vanishing into LastError()/TakeError().
+    void DrawNetErrorBanner() {
+        if (netError.empty()) return;
+        int bw = std::min((int)netError.length() * 8 + 20, SCREEN_W - 40);
+        int bx = SCREEN_W / 2 - bw / 2, by = SCREEN_H - 24;
+        FillRect(bx, by, bw, 20, olc::Pixel(60, 10, 10));
+        DrawRect(bx, by, bw, 20, olc::Pixel(200, 60, 60));
+        DrawString(bx + 8, by + 6, netError, olc::Pixel(255, 160, 160));
+    }
+
+    // Shown when NetUpdate() hasn't heard from the peer in NET_DISCONNECT_TIMEOUT_S —
+    // auto-returns to MENU after a few seconds, or immediately on SPACE.
+    void DrawDisconnectedScreen() {
+        Clear(olc::BLACK);
+        DrawString(SCREEN_W / 2 - 160, 150, "KafkaTanx!", olc::Pixel(255, 200, 0), 4);
+        DrawString(SCREEN_W / 2 - 130, 300, "Connection Lost", olc::Pixel(255, 100, 100), 3);
+        DrawString(SCREEN_W / 2 - 150, 345, "Lost contact with your opponent.", olc::Pixel(200, 200, 200));
+        DrawString(SCREEN_W / 2 - 110, 420, "Returning to menu...", olc::Pixel(140, 140, 140));
     }
 
     void DrawGameOverScreen() {
@@ -3118,7 +3215,18 @@ private:
         frameTime = fElapsedTime;
         UpdateShake(fElapsedTime);
 
-        // --- TITLE / MENU / LOBBY: draw directly, no shake needed ---
+        // Surface any newly-captured Kafka error (connection/auth/delivery
+        // failures) exactly once, and let a previously-shown one expire.
+        {
+            std::string e = kafkaNet.TakeError();
+            if (!e.empty()) SetNetError(e);
+        }
+        if (netErrorTimer > 0) {
+            netErrorTimer -= fElapsedTime;
+            if (netErrorTimer <= 0) netError.clear();
+        }
+
+        // --- TITLE / MENU / LOBBY / DISCONNECTED: draw directly, no shake needed ---
         if (state == GameState::TITLE) {
             SetDrawTarget(nullptr);
             DrawTitleScreen();
@@ -3133,8 +3241,21 @@ private:
         if (state == GameState::LOBBY) {
             SetDrawTarget(nullptr);
             NetUpdate();
+            if (netDisconnected) {
+                netDisconnected = false;
+                state = GameState::DISCONNECTED; stateTimer = 0;
+                return true;
+            }
             UpdateLobbyInput();
             DrawLobbyScreen();
+            return true;
+        }
+        if (state == GameState::DISCONNECTED) {
+            SetDrawTarget(nullptr);
+            DrawDisconnectedScreen();
+            if (stateTimer > 3.0f || GetKey(olc::Key::SPACE).bPressed) {
+                state = GameState::MENU; stateTimer = 0;
+            }
             return true;
         }
 
@@ -3153,6 +3274,12 @@ private:
 
         // Poll for incoming network messages every frame during active gameplay
         NetUpdate();
+        if (netDisconnected) {
+            netDisconnected = false;
+            SetDrawTarget(nullptr);
+            state = GameState::DISCONNECTED; stateTimer = 0;
+            return true;
+        }
 
         // While waiting for the host's TURN_RESULT we skip all state-machine
         // logic but still fall through to the render section below, so the
@@ -3486,6 +3613,7 @@ private:
         DrawNightOverlay(localPlayer);
         DrawPickupMessage();
         DrawUI();
+        DrawNetErrorBanner();
 
         // Overlay "Waiting for..." when it's the remote player's turn or we're awaiting result
         if (!IsLocalTurn() || waitForResult) {

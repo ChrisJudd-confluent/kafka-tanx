@@ -133,8 +133,42 @@ std::string KafkaConfig::GenerateGameCode() {
 
 KafkaNet::~KafkaNet() { Shutdown(); }
 
+// ---------------------------------------------------------------------------
+// Error-surfacing callbacks. Without these, connection/auth failures and
+// produce-time delivery failures are invisible to the app — only visible via
+// librdkafka's own stderr logging, which nobody running a packaged binary
+// with no attached terminal will ever see.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+class KafkaEventCb : public RdKafka::EventCb {
+public:
+    explicit KafkaEventCb(std::string* errorSink) : errorSink_(errorSink) {}
+    void event_cb(RdKafka::Event& event) override {
+        if (event.type() == RdKafka::Event::EVENT_ERROR)
+            *errorSink_ = "Kafka connection error: " + RdKafka::err2str(event.err());
+    }
+private:
+    std::string* errorSink_;
+};
+
+class KafkaDeliveryCb : public RdKafka::DeliveryReportCb {
+public:
+    explicit KafkaDeliveryCb(std::string* errorSink) : errorSink_(errorSink) {}
+    void dr_cb(RdKafka::Message& message) override {
+        if (message.err() != RdKafka::ERR_NO_ERROR)
+            *errorSink_ = "Message delivery failed: " + message.errstr();
+    }
+private:
+    std::string* errorSink_;
+};
+
+}  // namespace
+
 // Builds a base rdkafka configuration with SASL_SSL credentials.
-static RdKafka::Conf* MakeBaseConf(const KafkaConfig& cfg, std::string& err) {
+static RdKafka::Conf* MakeBaseConf(const KafkaConfig& cfg, std::string& err,
+                                    RdKafka::EventCb* eventCb) {
     auto* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
     auto set = [&](const char* k, const std::string& v) -> bool {
         return conf->set(k, v, err) == RdKafka::Conf::CONF_OK;
@@ -152,6 +186,7 @@ static RdKafka::Conf* MakeBaseConf(const KafkaConfig& cfg, std::string& err) {
         delete conf;
         return nullptr;
     }
+    conf->set("event_cb", eventCb, err);
     return conf;
 }
 
@@ -159,8 +194,14 @@ bool KafkaNet::Init(const KafkaConfig& cfg) {
     cfg_ = cfg;
     std::string err;
 
-    auto* pconf = MakeBaseConf(cfg, err);
+    auto* eventCb    = new KafkaEventCb(&lastError_);
+    auto* deliveryCb = new KafkaDeliveryCb(&lastError_);
+    eventCb_    = eventCb;
+    deliveryCb_ = deliveryCb;
+
+    auto* pconf = MakeBaseConf(cfg, err, eventCb);
     if (!pconf) { lastError_ = "Producer conf: " + err; return false; }
+    pconf->set("dr_cb", deliveryCb, err);
 
     auto* prod = RdKafka::Producer::create(pconf, err);
     delete pconf;
@@ -184,6 +225,10 @@ void KafkaNet::Shutdown() {
         delete p;
         producer_ = nullptr;
     }
+    delete static_cast<RdKafka::EventCb*>(eventCb_);
+    eventCb_ = nullptr;
+    delete static_cast<RdKafka::DeliveryReportCb*>(deliveryCb_);
+    deliveryCb_ = nullptr;
     ready_ = false;
 }
 
@@ -195,7 +240,7 @@ void KafkaNet::SubscribeGameplay(const std::string& gameCode,
                                   const std::string& playerId) {
     UnsubscribeGameplay(); // avoid leaking a consumer if already subscribed to a prior session
     std::string err;
-    auto* cconf = MakeBaseConf(cfg_, err);
+    auto* cconf = MakeBaseConf(cfg_, err, static_cast<RdKafka::EventCb*>(eventCb_));
     if (!cconf) { lastError_ = err; return; }
 
     // Unique consumer group per player per game — both players receive all messages.
@@ -282,6 +327,14 @@ bool KafkaNet::PollGameplay(KafkaMsg& out, int timeoutMs) {
         out.messageType    = r.ReadEnum();
         out.payload        = r.ReadBytes();
         decoded = r.Ok();
+    } else if (unwrapped) {
+        // Message is well-formed but tagged with a different schema ID than
+        // this client's client-kafka.ini expects — could be another tester
+        // on a stale/mismatched clone, or this client's own ini going stale
+        // after a schema re-registration. Silently dropping it (as before)
+        // is safe, but invisible; at least make it discoverable.
+        lastError_ = "Gameplay message schema ID mismatch: got " + std::to_string(schemaId)
+                   + ", expected " + std::to_string(cfg_.schemaIdGameplay);
     }
 
     delete msg;

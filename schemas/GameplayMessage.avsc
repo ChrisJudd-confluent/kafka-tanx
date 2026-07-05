@@ -13,7 +13,8 @@
     { "name": "message_type",     "type": {
         "type": "enum",
         "name": "GameMessageType",
-        "symbols": ["MATCH_START", "ROUND_START", "TURN_ACTION", "TURN_RESULT", "DISCONNECT", "PLAYER_NAME"]
+        "symbols": ["MATCH_START", "ROUND_START", "TURN_ACTION", "TURN_RESULT", "DISCONNECT", "PLAYER_NAME", "PING"],
+        "doc": "PING (index 6) is a transport-only liveness heartbeat added after the enum was first registered. The hand-rolled codec (avro_codec.h) encodes enums as plain integers with no validation against this symbol list, so PING works with clients still on the originally-registered schema version — re-registering this schema is only needed if you want the Schema Registry's own record to reflect it, not for the game to function."
       }
     },
     { "name": "payload",          "type": "bytes",
