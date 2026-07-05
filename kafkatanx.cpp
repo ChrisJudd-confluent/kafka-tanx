@@ -17,85 +17,49 @@
 #include <filesystem>
 #include <optional>
 #include <cstring>
+#include <chrono>
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 
-// --- Platform-specific socket headers ----------------------------------------
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-   typedef SOCKET SocketHandle;
-#  define INVALID_SOCK INVALID_SOCKET
-#  define SOCK_ERR     SOCKET_ERROR
-   static int NetErrno()        { return WSAGetLastError(); }
-   static bool WouldBlock()     { return WSAGetLastError() == WSAEWOULDBLOCK; }
-   static void CloseSocket(SocketHandle s) { closesocket(s); }
-#else
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <arpa/inet.h>
-#  include <netdb.h>
-#  include <unistd.h>
-#  include <fcntl.h>
-#  include <errno.h>
-   typedef int SocketHandle;
-#  define INVALID_SOCK (-1)
-#  define SOCK_ERR     (-1)
-   static int  NetErrno()       { return errno; }
-   static bool WouldBlock()     { return errno == EAGAIN || errno == EWOULDBLOCK; }
-   static void CloseSocket(SocketHandle s) { close(s); }
-#endif
-
-static void SetNonBlocking(SocketHandle s) {
-#ifdef _WIN32
-    u_long m = 1; ioctlsocket(s, FIONBIO, &m);
-#else
-    int fl = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, fl | O_NONBLOCK);
-#endif
-}
-
-// Returns the best-guess LAN IP for this machine (IPv4)
-static std::string GetLocalIP() {
-    char hostname[256];
-    if (gethostname(hostname, sizeof(hostname)) != 0) return "?.?.?.?";
-    struct addrinfo hints = {}, *res;
-    hints.ai_family = AF_INET;
-    if (getaddrinfo(hostname, nullptr, &hints, &res) != 0) return "?.?.?.?";
-    char ip[INET_ADDRSTRLEN] = {};
-    inet_ntop(AF_INET, &((struct sockaddr_in*)res->ai_addr)->sin_addr, ip, sizeof(ip));
-    freeaddrinfo(res);
-    return std::string(ip);
-}
+#include "kafka_net.h"
 
 // --- Network message protocol -----------------------------------------------
-constexpr uint16_t NET_PORT = 7890;
+// Portable big-endian byte-swap helpers (NetBuf/NetReader payloads are shipped
+// as Avro `bytes` inside a GameplayMessage now, but keep the same internal wire
+// format so the encode/decode logic below is unchanged from the TCP version).
+static uint32_t BSwap32(uint32_t v) {
+    return ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) |
+           ((v & 0x00FF0000u) >> 8)  | ((v & 0xFF000000u) >> 24);
+}
 
 enum class NetMode { NONE, HOST, CLIENT };
 
+// Values match the Avro GameMessageType enum symbol order exactly
+// (schemas/GameplayMessage.avsc) since KafkaMsg::messageType is that enum's
+// ordinal — the two must stay in lockstep.
 enum class NetMsg : uint8_t {
-    MATCH_START   = 1,  // host → client: GameSettings + player names
-    ROUND_START   = 2,  // host → client: terrain array + positions + wind + gravity
-    TURN_ACTION   = 3,  // acting → other: finalX, weapon, angle, power, flags
-    TURN_RESULT   = 4,  // host → client: canonical HP/shields/ammo/pickup/wind
-    DISCONNECT    = 5,
-    PLAYER_NAME   = 6,  // client → host: the client's chosen display name
+    MATCH_START   = 0,  // host → client: GameSettings + player names
+    ROUND_START   = 1,  // host → client: terrain array + positions + wind + gravity
+    TURN_ACTION   = 2,  // acting → other: finalX, weapon, angle, power, flags
+    TURN_RESULT   = 3,  // host → client: canonical HP/shields/ammo/pickup/wind
+    DISCONNECT    = 4,
+    PLAYER_NAME   = 5,  // client → host: the client's chosen display name
 };
 
 // Helper: write/read primitives into a byte buffer
 struct NetBuf {
     std::vector<uint8_t> data;
     void writeU8(uint8_t  v) { data.push_back(v); }
-    void writeI32(int32_t v) { uint32_t n = htonl((uint32_t)v); uint8_t b[4]; memcpy(b,&n,4); data.insert(data.end(),b,b+4); }
-    void writeF32(float   v) { uint32_t n; memcpy(&n,&v,4); n=htonl(n); uint8_t b[4]; memcpy(b,&n,4); data.insert(data.end(),b,b+4); }
+    void writeI32(int32_t v) { uint32_t n = BSwap32((uint32_t)v); uint8_t b[4]; memcpy(b,&n,4); data.insert(data.end(),b,b+4); }
+    void writeF32(float   v) { uint32_t n; memcpy(&n,&v,4); n=BSwap32(n); uint8_t b[4]; memcpy(b,&n,4); data.insert(data.end(),b,b+4); }
     void writeStr(const std::string& s) { writeU8((uint8_t)s.size()); data.insert(data.end(),s.begin(),s.end()); }
 };
 struct NetReader {
     const uint8_t* d; size_t pos = 0;
     uint8_t  readU8()  { return d[pos++]; }
-    int32_t  readI32() { uint32_t n; memcpy(&n,d+pos,4); pos+=4; return (int32_t)ntohl(n); }
-    float    readF32() { uint32_t n; memcpy(&n,d+pos,4); pos+=4; n=ntohl(n); float v; memcpy(&v,&n,4); return v; }
+    int32_t  readI32() { uint32_t n; memcpy(&n,d+pos,4); pos+=4; return (int32_t)BSwap32(n); }
+    float    readF32() { uint32_t n; memcpy(&n,d+pos,4); pos+=4; n=BSwap32(n); float v; memcpy(&v,&n,4); return v; }
     std::string readStr() { uint8_t len=readU8(); std::string s((char*)d+pos,len); pos+=len; return s; }
 };
 
@@ -307,24 +271,144 @@ private:
     bool drawGame = false;    // true when both tanks die simultaneously or a round times out
     int turnsSinceHit = 0;    // stalemate counter: increments each turn; resets on any hit
 
-    // -- Networking --
+    // -- Networking (Kafka) --
+    KafkaConfig   kafkaConfig;                  // loaded from client-kafka.ini in OnUserCreate
+    KafkaNet      kafkaNet;                     // producer created once at startup; consumer per session
+    std::string   gameCode;                     // active session's 6-char code
+    std::string   remotePlayerId;                // Kafka player id of the opponent, learned from their first message
     NetMode       netMode       = NetMode::NONE;
-    SocketHandle  listenSock    = INVALID_SOCK; // host: accept socket
-    SocketHandle  remoteSock    = INVALID_SOCK; // connected peer
     int           localPlayer   = 0;            // which player index this machine controls
     bool          netConnected  = false;
     bool          waitForResult = false;        // client waits for TURN_RESULT after explosion
     bool          hasPendingResult = false;     // TURN_RESULT arrived mid-animation; apply when ready
     std::vector<uint8_t> pendingResultData;    // buffered TURN_RESULT payload
     float         nextWind = 0;               // HOST pre-computes next wind; CLIENT reads from TURN_RESULT
-    std::string   localIP;
-    std::string   netIPInput;                   // client: typed target IP
+    std::string   netGameCodeInput;              // client: typed game code
     std::string   netLobbyName;                 // name typed in the lobby before connecting
     bool          netEditingName = false;        // is the name field active?
     bool          netReadyToStart = false;       // host: true once client name received
     bool          netNameSent = false;           // client: has name been sent to host yet?
     float         netLobbyBlink = 0;
-    std::vector<uint8_t> recvBuf;              // raw TCP stream buffer
+
+    // -- Analytics (HOST only) --
+    WeaponType    lastFiredWeapon = WeaponType::NORMAL; // snapshot before Fire()/FireLaser() reset it
+    bool          shotHit = false;
+    int           shotTargetHpBefore = 0;
+    int           shotTargetHpAfter  = 0;
+    float         shotCraterX = 0, shotCraterY = 0;
+    int           roundTurnCounter = 0;
+    int           roundShotsFired  = 0;
+    int           matchTurnCounter = 0; // cumulative across all rounds in the match, for GameEvent.total_turns
+    int64_t       roundStartEpochMs = 0;
+    int64_t       matchStartEpochMs = 0;
+
+    static int64_t NowEpochMs() {
+        using namespace std::chrono;
+        return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+    }
+
+    static std::string WeaponToString(WeaponType w) {
+        switch (w) {
+            case WeaponType::HE:      return "HE";
+            case WeaponType::CLUSTER: return "CLUSTER";
+            case WeaponType::LASER:   return "LASER";
+            default:                  return "NORMAL";
+        }
+    }
+    static std::string WindSettingToString(int v) {
+        static const char* s[] = {"NONE","LIGHT","MEDIUM","STRONG","RANDOM"};
+        return (v >= 0 && v < 5) ? s[v] : "RANDOM";
+    }
+    static std::string GravitySettingToString(int v) {
+        static const char* s[] = {"LIGHT","MEDIUM","STRONG","RANDOM"};
+        return (v >= 0 && v < 4) ? s[v] : "RANDOM";
+    }
+    static std::string LandscapeSettingToString(int v) {
+        static const char* s[] = {"MOUNTAINS","FOOTHILLS","RANDOM"};
+        return (v >= 0 && v < 3) ? s[v] : "RANDOM";
+    }
+
+    // Kafka player id for a tank index — only meaningful on the HOST, which is
+    // always localPlayer 0 with the opponent's id learned from their first message.
+    std::string PlayerIdForTank(int idx) const {
+        return (idx == localPlayer) ? kafkaConfig.playerId : remotePlayerId;
+    }
+
+    // Publishes one ShotEvent using the shot* members captured during FIRING
+    // resolution. Called by the HOST at each of the three points a turn's
+    // outcome becomes final: plain miss, explosion resolve, and laser resolve.
+    void PublishShotAnalytics() {
+        if (netMode != NetMode::HOST || gameCode.empty()) return;
+        int opponent = 1 - currentPlayer;
+        ShotEventData ev;
+        ev.gameCode         = gameCode;
+        ev.round            = roundNumber;
+        ev.turn             = roundTurnCounter;
+        ev.shooterPlayerId  = PlayerIdForTank(currentPlayer);
+        ev.shooterName      = settings.playerNames[currentPlayer];
+        ev.targetPlayerId   = PlayerIdForTank(opponent);
+        ev.targetName       = settings.playerNames[opponent];
+        ev.weapon           = WeaponToString(lastFiredWeapon);
+        ev.angle            = (float)tanks[currentPlayer].angle;
+        ev.power            = (float)tanks[currentPlayer].power;
+        ev.windSpeed        = wind;
+        ev.gravitySetting   = GravitySettingToString(settings.gravitySetting);
+        ev.landscapeSetting = LandscapeSettingToString(settings.landscapeSetting);
+        ev.nightMode        = settings.nightMode;
+        ev.hit              = shotHit;
+        ev.damageDealt      = shotTargetHpBefore - shotTargetHpAfter;
+        ev.targetHpBefore   = shotTargetHpBefore;
+        ev.targetHpAfter    = shotTargetHpAfter;
+        ev.craterX          = shotCraterX;
+        ev.craterY          = shotCraterY;
+        ev.shotAt           = NowEpochMs();
+        kafkaNet.PublishShot(ev);
+        roundShotsFired++;
+    }
+
+    // Publishes one RoundEvent — called by the HOST once a round resolves
+    // (a tank died, or the stalemate counter expired).
+    void PublishRoundAnalytics(const std::string& winnerPlayerId, const std::string& winnerName,
+                                const std::string& drawReason) {
+        if (netMode != NetMode::HOST || gameCode.empty()) return;
+        RoundEventData ev;
+        ev.gameCode        = gameCode;
+        ev.roundNumber     = roundNumber;
+        ev.winnerPlayerId  = winnerPlayerId;
+        ev.winnerName      = winnerName;
+        ev.drawReason      = drawReason;
+        ev.turnsTaken      = roundTurnCounter;
+        ev.shotsFired      = roundShotsFired;
+        ev.endedAt         = NowEpochMs();
+        ev.durationSeconds = (float)(ev.endedAt - roundStartEpochMs) / 1000.0f;
+        kafkaNet.PublishRound(ev);
+    }
+
+    // Publishes one GameEvent — called by the HOST once the whole match ends
+    // (a player has enough round wins, or the match was decided by surrender).
+    void PublishGameAnalytics(const std::string& winnerPlayerId, const std::string& winnerName) {
+        if (netMode != NetMode::HOST || gameCode.empty()) return;
+        GameEventData ev;
+        ev.gameCode         = gameCode;
+        ev.hostPlayerId     = PlayerIdForTank(0);
+        ev.hostName         = settings.playerNames[0];
+        ev.clientPlayerId   = PlayerIdForTank(1);
+        ev.clientName       = settings.playerNames[1];
+        ev.winnerPlayerId   = winnerPlayerId;
+        ev.winnerName       = winnerName;
+        ev.roundsPlayed     = roundNumber;
+        ev.totalTurns       = matchTurnCounter;
+        ev.windSetting      = WindSettingToString(settings.windSetting);
+        ev.gravitySetting   = GravitySettingToString(settings.gravitySetting);
+        ev.landscapeSetting = LandscapeSettingToString(settings.landscapeSetting);
+        ev.nightMode        = settings.nightMode;
+        ev.roundsToWin      = settings.roundsToWin;
+        ev.startingHp       = settings.startingHP;
+        ev.startedAt        = matchStartEpochMs;
+        ev.endedAt          = NowEpochMs();
+        ev.durationSeconds  = (float)(ev.endedAt - matchStartEpochMs) / 1000.0f;
+        kafkaNet.PublishGame(ev);
+    }
 
     // -- Settings & menu --
     GameSettings settings;
@@ -657,98 +741,67 @@ private:
     // All multi-byte integers are sent in network byte order (big-endian).
     // =========================================================================
 
-    // Frame and transmit one packet over the TCP connection.
-    // Header packs the message type (top byte) and payload length (24 bits)
-    // into a single uint32 sent in network byte order.
+    // Publish one message on kafkatanx-gameplay for the active session.
+    // Direct replacement for the old TCP send() — framing and transport are
+    // now owned by KafkaNet/Avro instead of a hand-rolled 4-byte header.
     void NetSend(NetMsg type, const std::vector<uint8_t>& payload) {
-        if (remoteSock == INVALID_SOCK) return;
-        uint32_t header = htonl(((uint32_t)type << 24) | (uint32_t)payload.size());
-        send(remoteSock, (const char*)&header, 4, 0);
-        if (!payload.empty()) send(remoteSock, (const char*)payload.data(), (int)payload.size(), 0);
+        if (gameCode.empty()) return;
+        kafkaNet.SendGameplay(gameCode, (int32_t)type, payload);
     }
 
-    // Called every frame during active gameplay.
-    // Uses non-blocking I/O: recv() returns immediately whether or not data is
-    // waiting. Incoming bytes accumulate in recvBuf; complete packets are
-    // extracted and dispatched to NetHandleMessage() one at a time.
+    // Called every frame during the lobby and active gameplay.
+    // Drains every message currently available on the session's Kafka consumer
+    // (bounded, so a backlog can't stall a frame) and dispatches each one to
+    // NetHandleMessage() — this replaces the old recvBuf stream-parsing loop.
     void NetUpdate() {
-        // HOST: check for a new incoming connection (lobby waiting phase)
-        if (netMode == NetMode::HOST && listenSock != INVALID_SOCK && remoteSock == INVALID_SOCK) {
-            sockaddr_in ca{}; socklen_t cl = sizeof(ca);
-            SocketHandle c = accept(listenSock, (sockaddr*)&ca, &cl);
-            if (c != INVALID_SOCK) {
-                remoteSock = c;
-                SetNonBlocking(remoteSock);
-                netConnected = true;
-            }
-        }
-        if (remoteSock == INVALID_SOCK) return;
+        if (gameCode.empty()) return;
 
-        // CLIENT: first time connected, immediately tell the host our display name
-        // so the host can include it in MATCH_START and both screens show both names
-        if (netMode == NetMode::CLIENT && netConnected && !netNameSent) {
-            NetBuf b; b.writeStr(settings.playerNames[1]);
-            NetSend(NetMsg::PLAYER_NAME, b.data);
-            netNameSent = true;
-        }
+        KafkaMsg msg;
+        int guard = 0;
+        while (guard++ < 64 && kafkaNet.PollGameplay(msg, /*timeoutMs=*/0)) {
+            if (msg.gameCode != gameCode) continue;                    // not our session
+            if (msg.senderPlayerId == kafkaConfig.playerId) continue;  // our own echo
 
-        // Drain whatever bytes the OS has buffered into our stream buffer
-        char chunk[4096];
-        int n = recv(remoteSock, chunk, sizeof(chunk), 0);
-        if (n > 0) {
-            recvBuf.insert(recvBuf.end(), chunk, chunk + n);
-        } else if (n == 0) {
-            NetClose(); return;  // graceful disconnect
-        } else if (n < 0 && !WouldBlock()) {
-            NetClose(); return;  // error
-        }
+            // First message we see from the opponent means they're present —
+            // there's no TCP handshake to detect this via anymore.
+            netConnected = true;
+            remotePlayerId = msg.senderPlayerId;
 
-        // Extract all complete packets from the stream buffer.
-        // TCP can deliver multiple packets in one recv() call, or split a single
-        // packet across multiple calls — the buffer handles both cases.
-        while (recvBuf.size() >= 4) {
-            uint32_t hdr; memcpy(&hdr, recvBuf.data(), 4); hdr = ntohl(hdr);
-            NetMsg type = (NetMsg)(hdr >> 24);
-            uint32_t plen = hdr & 0xFFFFFF;
-            if (recvBuf.size() < 4 + plen) break;  // packet not yet fully arrived
-            std::vector<uint8_t> pkt(recvBuf.begin() + 4, recvBuf.begin() + 4 + plen);
-            recvBuf.erase(recvBuf.begin(), recvBuf.begin() + 4 + plen);
-            NetHandleMessage(type, pkt);
+            NetHandleMessage((NetMsg)msg.messageType, msg.payload);
         }
     }
 
     void NetClose() {
-        if (remoteSock != INVALID_SOCK) { CloseSocket(remoteSock); remoteSock = INVALID_SOCK; }
-        if (listenSock != INVALID_SOCK) { CloseSocket(listenSock); listenSock = INVALID_SOCK; }
+        kafkaNet.UnsubscribeGameplay();
         netConnected = false;
+        gameCode.clear();
+        remotePlayerId.clear();
     }
 
-    // HOST: bind and listen on NET_PORT. Sets localPlayer = 0 (HOST is always P1).
+    // HOST: generate a game code, announce the session as WAITING, and
+    // subscribe to the gameplay topic. Sets localPlayer = 0 (HOST is always P1).
     bool NetStartHost() {
-        listenSock = socket(AF_INET, SOCK_STREAM, 0);
-        if (listenSock == INVALID_SOCK) return false;
-        int yes = 1; setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
-        SetNonBlocking(listenSock);
-        sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(NET_PORT); addr.sin_addr.s_addr = INADDR_ANY;
-        if (bind(listenSock, (sockaddr*)&addr, sizeof(addr)) < 0) { CloseSocket(listenSock); listenSock = INVALID_SOCK; return false; }
-        listen(listenSock, 1);
+        if (!kafkaNet.IsReady()) return false;
+        gameCode = KafkaConfig::GenerateGameCode();
+        kafkaNet.PublishPlayerProfile();
+        kafkaNet.PublishSessionWaiting(gameCode);
+        kafkaNet.SubscribeGameplay(gameCode, kafkaConfig.playerId);
         localPlayer = 0;
-        localIP = GetLocalIP();
         return true;
     }
 
-    // CLIENT: connect to the host's IP on NET_PORT. Sets localPlayer = 1 (CLIENT is always P2).
-    bool NetConnectToHost(const std::string& ip) {
-        remoteSock = socket(AF_INET, SOCK_STREAM, 0);
-        if (remoteSock == INVALID_SOCK) return false;
-        sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_port = htons(NET_PORT);
-        inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
-        if (connect(remoteSock, (sockaddr*)&addr, sizeof(addr)) < 0 && !WouldBlock()) {
-            CloseSocket(remoteSock); remoteSock = INVALID_SOCK; return false;
-        }
-        SetNonBlocking(remoteSock);
+    // CLIENT: join an existing session by its game code, subscribe, and send
+    // our display name immediately. Sets localPlayer = 1 (CLIENT is always P2).
+    bool NetJoinGame(const std::string& code) {
+        if (!kafkaNet.IsReady() || code.empty()) return false;
+        gameCode = code;
+        kafkaNet.PublishPlayerProfile();
+        kafkaNet.SubscribeGameplay(gameCode, kafkaConfig.playerId);
         localPlayer = 1;
-        netConnected = true;
+        netConnected = true; // optimistic — no handshake to wait for
+        NetBuf b; b.writeStr(settings.playerNames[1]);
+        NetSend(NetMsg::PLAYER_NAME, b.data);
+        netNameSent = true;
         return true;
     }
 
@@ -758,7 +811,7 @@ private:
     // Mark the CLIENT as ready to receive the HOST's canonical state.
     // If a TURN_RESULT arrived early (mid-animation) it was buffered — flush it now.
     void SetWaitForResult() {
-        SetWaitForResult();
+        waitForResult = true;
         if (hasPendingResult) {
             std::vector<uint8_t> saved = pendingResultData;
             hasPendingResult = false; pendingResultData.clear();
@@ -823,6 +876,9 @@ private:
     // Terrain is re-sent in full after every explosion so crater damage stays
     // pixel-identical on both machines.
     void NetSendTurnResult() {
+        roundTurnCounter++;
+        matchTurnCounter++;
+
         // HOST pre-computes the wind for the NEXT turn here so the CLIENT uses
         // the exact same value. Without this both machines call rand() independently
         // in NEXT_TURN and the wind diverges, causing different projectile paths.
@@ -1007,10 +1063,16 @@ private:
     // =========================================================================
 
     bool OnUserCreate() override {
-#ifdef _WIN32
-        WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
-#endif
         srand((unsigned)time(nullptr));
+
+        // Kafka identity + connection — the producer lives for the whole app
+        // run; the consumer is subscribed/unsubscribed per session (NetStartHost/NetJoinGame/NetClose).
+        kafkaConfig = KafkaConfig::LoadFromFile("client-kafka.ini");
+        if (!kafkaConfig.HasPlayerIdentity()) {
+            kafkaConfig.GeneratePlayerId();
+            kafkaConfig.SaveToFile("client-kafka.ini");
+        }
+        kafkaNet.Init(kafkaConfig);
         roundNumber = 0;
         tanks[0].score = 0;
         tanks[1].score = 0;
@@ -1046,9 +1108,17 @@ private:
         return true;
     }
 
+    bool OnUserDestroy() override {
+        kafkaNet.Shutdown();
+        return true;
+    }
+
     // Reset for a new round (keeps scores and settings)
     void NewRound() {
         roundNumber++;
+        roundTurnCounter = 0;
+        roundShotsFired  = 0;
+        roundStartEpochMs = NowEpochMs();
 
         // Apply gravity setting
         float gravities[] = {90.0f, 180.0f, 360.0f};
@@ -1117,6 +1187,7 @@ private:
 
     void StartNewMatch() {
         roundNumber = 0;
+        matchTurnCounter = 0;
         for (int i = 0; i < 2; i++) {
             tanks[i].score = 0;
             tanks[i].ammoHE = settings.startAmmoHE;
@@ -1446,6 +1517,14 @@ private:
     }
 
     void Fire() {
+        // Snapshot for analytics — selectedWeapon gets reset to NORMAL before
+        // the shot resolves, so this is the only reliable place to capture it.
+        lastFiredWeapon    = selectedWeapon;
+        shotHit            = false;
+        shotTargetHpBefore = tanks[1 - currentPlayer].hp;
+        shotTargetHpAfter  = shotTargetHpBefore;
+        shotCraterX = 0; shotCraterY = 0;
+
         // In network mode, send the action so the remote fires simultaneously
         if (netMode != NetMode::NONE && IsLocalTurn())
             NetSendTurnAction(false, false);
@@ -1499,6 +1578,9 @@ private:
 
             if (CheckTankHit(opponent, x, y)) {
                 ApplyHitDamage(opponent);
+                shotHit = true;
+                shotTargetHpAfter = tanks[opponent].hp;
+                shotCraterX = x; shotCraterY = y;
                 break;
             }
             if (x < 0 || x >= SCREEN_W || y < 0 || y > SCREEN_H + 50) break;
@@ -2949,11 +3031,11 @@ private:
         if (netMode == NetMode::NONE) {
             DrawWoodPanel(100, 200, 240, 80);
             DrawString(150, 225, "HOST GAME", olc::Pixel(100, 255, 100), 2);
-            DrawString(120, 255, "Share your IP with other player", olc::Pixel(180,180,180));
+            DrawString(120, 255, "Get a code to share", olc::Pixel(180,180,180));
 
             DrawWoodPanel(460, 200, 240, 80);
             DrawString(510, 225, "JOIN GAME", olc::Pixel(100, 200, 255), 2);
-            DrawString(480, 255, "Type the host's IP address", olc::Pixel(180,180,180));
+            DrawString(480, 255, "Type the host's game code", olc::Pixel(180,180,180));
 
             DrawString(SCREEN_W/2 - 40, 500, "ESC = back", olc::Pixel(140,140,140));
 
@@ -2961,24 +3043,28 @@ private:
                 int mx = GetMouseX(), my = GetMouseY();
                 if (mx >= 100 && mx < 340 && my >= 200 && my < 280) {
                     settings.playerNames[0] = netLobbyName.empty() ? "Player 1" : netLobbyName;
+                    kafkaConfig.playerName = settings.playerNames[0];
+                    kafkaConfig.SaveToFile("client-kafka.ini");
                     if (NetStartHost()) { netMode = NetMode::HOST; netReadyToStart = false; }
                 }
                 if (mx >= 460 && mx < 700 && my >= 200 && my < 280) {
                     settings.playerNames[1] = netLobbyName.empty() ? "Player 2" : netLobbyName;
+                    kafkaConfig.playerName = settings.playerNames[1];
+                    kafkaConfig.SaveToFile("client-kafka.ini");
                     netMode = NetMode::CLIENT;
-                    netIPInput.clear();
+                    netGameCodeInput.clear();
                     netNameSent = false;
                 }
             }
         }
         else if (netMode == NetMode::HOST) {
             DrawString(SCREEN_W/2 - 40, 200, "HOST MODE", olc::Pixel(100,255,100), 2);
-            DrawString(SCREEN_W/2 - 80, 250, "Your IP address:", olc::WHITE);
-            DrawString(SCREEN_W/2 - (int)(localIP.length()*12), 275, localIP, olc::YELLOW, 3);
+            DrawString(SCREEN_W/2 - 60, 250, "Your game code:", olc::WHITE);
+            DrawString(SCREEN_W/2 - (int)(gameCode.length()*12), 275, gameCode, olc::YELLOW, 3);
             DrawString(SCREEN_W/2 - 100, 345, "Share this with the other player.", olc::Pixel(180,180,180));
 
             if (!netConnected) {
-                std::string waiting = "Waiting for connection...";
+                std::string waiting = "Waiting for opponent to join...";
                 DrawString(SCREEN_W/2 - (int)(waiting.length()*4), 400, waiting,
                     olc::Pixel(100,200,255,(int)(200+55*pulse)));
             } else if (!netReadyToStart) {
@@ -2987,7 +3073,9 @@ private:
             } else {
                 // Both connected and name received — start the match (runs once)
                 DrawString(SCREEN_W/2 - 72, 400, "Starting match...", olc::WHITE);
+                matchStartEpochMs = NowEpochMs();
                 StartNewMatch();
+                kafkaNet.PublishSessionActive(gameCode);
                 NetSendMatchStart();
                 NetSendRoundStart();
             }
@@ -2995,31 +3083,28 @@ private:
         }
         else if (netMode == NetMode::CLIENT) {
             DrawString(SCREEN_W/2 - 40, 200, "JOIN GAME", olc::Pixel(100,200,255), 2);
-            DrawString(SCREEN_W/2 - 100, 255, "Enter host IP address:", olc::WHITE);
+            DrawString(SCREEN_W/2 - 100, 255, "Enter the host's game code:", olc::WHITE);
 
             int fieldX = SCREEN_W/2 - 140, fieldY = 275, fieldW = 280;
-            bool ipHovered = GetMouseX() >= fieldX && GetMouseX() < fieldX+fieldW
+            bool codeHovered = GetMouseX() >= fieldX && GetMouseX() < fieldX+fieldW
                           && GetMouseY() >= fieldY && GetMouseY() < fieldY+24;
             FillRect(fieldX, fieldY, fieldW, 24, olc::Pixel(20,15,10));
             DrawRect(fieldX, fieldY, fieldW, 24, (!netEditingName) ? olc::Pixel(100,100,255) : olc::Pixel(80,60,30));
-            std::string ipDisplay = netIPInput + ((!netEditingName) && fmod(netLobbyBlink,0.8f)<0.4f ? "_" : "");
-            DrawString(fieldX + 6, fieldY + 8, ipDisplay, olc::Pixel(100,200,255));
-            if (GetMouse(0).bPressed && ipHovered) netEditingName = false;
+            std::string codeDisplay = netGameCodeInput + ((!netEditingName) && fmod(netLobbyBlink,0.8f)<0.4f ? "_" : "");
+            DrawString(fieldX + 6, fieldY + 8, codeDisplay, olc::Pixel(100,200,255), 2);
+            if (GetMouse(0).bPressed && codeHovered) netEditingName = false;
 
             DrawString(SCREEN_W/2 - 60, 315, "ENTER to connect", olc::Pixel(200,200,200));
             DrawString(SCREEN_W/2 - 40, 500, "ESC = cancel", olc::Pixel(140,140,140));
 
-            if (!netConnected) {
-                if (!netIPInput.empty())
-                    DrawString(SCREEN_W/2 - 60, 370, "Connecting...", olc::YELLOW);
-            } else {
+            if (netConnected) {
                 DrawString(SCREEN_W/2 - 72, 370, "Connected!", olc::Pixel(100,255,100));
                 DrawString(SCREEN_W/2 - 100, 390, "Waiting for host to start...", olc::Pixel(180,180,180));
             }
         }
     }
 
-    // Lobby keyboard input — handles both the name field and the IP field
+    // Lobby keyboard input — handles both the name field and the game-code field
     void UpdateLobbyInput() {
         netLobbyBlink += frameTime;
 
@@ -3031,13 +3116,14 @@ private:
             if (GetKey(olc::Key::BACK).bPressed && !netLobbyName.empty()) netLobbyName.pop_back();
             if (GetKey(olc::Key::ENTER).bPressed || GetKey(olc::Key::RETURN).bPressed) netEditingName = false;
         } else if (netMode == NetMode::CLIENT && !netConnected) {
-            // IP field is active
+            // Game-code field is active — 6-char alphanumeric
+            char letter = GetLetterPressed();
             int digit = GetDigitPressed();
-            if (digit >= 0 && netIPInput.length() < 15) netIPInput += std::to_string(digit);
-            if (GetKey(olc::Key::PERIOD).bPressed && netIPInput.length() < 15) netIPInput += '.';
-            if (GetKey(olc::Key::BACK).bPressed && !netIPInput.empty()) netIPInput.pop_back();
-            if ((GetKey(olc::Key::ENTER).bPressed || GetKey(olc::Key::RETURN).bPressed) && !netIPInput.empty())
-                NetConnectToHost(netIPInput);
+            if (letter != '\0' && netGameCodeInput.length() < 6) netGameCodeInput += letter;
+            if (digit >= 0 && netGameCodeInput.length() < 6) netGameCodeInput += ('0' + digit);
+            if (GetKey(olc::Key::BACK).bPressed && !netGameCodeInput.empty()) netGameCodeInput.pop_back();
+            if ((GetKey(olc::Key::ENTER).bPressed || GetKey(olc::Key::RETURN).bPressed) && !netGameCodeInput.empty())
+                NetJoinGame(netGameCodeInput);
         }
 
         if (GetKey(olc::Key::ESCAPE).bPressed) {
@@ -3277,6 +3363,9 @@ private:
 
                     if (CheckTankHit(opponent, p.x, p.y)) {
                         ApplyHitDamage(opponent);
+                        shotHit = true;
+                        shotTargetHpAfter = tanks[opponent].hp;
+                        shotCraterX = p.x; shotCraterY = p.y;
                         explosions.push_back({p.x, p.y, 1.0f, radius, 0, true});
                         p.active = false;
                         StopWhistleSound();
@@ -3310,7 +3399,11 @@ private:
                     state = GameState::EXPLOSION; stateTimer = 0;
                 } else {
                     // Miss — no explosion to trigger TURN_RESULT, sync ammo manually
-                    if (netMode == NetMode::HOST) { NetSendTurnResult(); state = GameState::NEXT_TURN; stateTimer = 0; }
+                    if (netMode == NetMode::HOST) {
+                        NetSendTurnResult();
+                        PublishShotAnalytics();
+                        state = GameState::NEXT_TURN; stateTimer = 0;
+                    }
                     else if (netMode == NetMode::CLIENT) { SetWaitForResult(); }
                     else { state = GameState::NEXT_TURN; stateTimer = 0; }
                 }
@@ -3339,14 +3432,24 @@ private:
 
                 if (netMode == NetMode::HOST) {
                     // Host is authoritative: apply outcome, send canonical state to client
-                    if (tanks[0].hp <= 0 || tanks[1].hp <= 0) {
-                        bool bothDead = tanks[0].hp <= 0 && tanks[1].hp <= 0;
+                    bool roundOver = (tanks[0].hp <= 0 || tanks[1].hp <= 0);
+                    bool bothDead  = tanks[0].hp <= 0 && tanks[1].hp <= 0;
+                    if (roundOver) {
                         if (bothDead) drawGame = true;
                         else if (!surrendered) { int w = (tanks[0].hp <= 0) ? 1 : 0; tanks[w].score++; }
                     }
                     NetSendTurnResult();
+                    PublishShotAnalytics();
+                    if (roundOver) {
+                        if (bothDead) {
+                            PublishRoundAnalytics("", "", "MUTUAL_KILL");
+                        } else {
+                            int w = (tanks[0].hp <= 0) ? 1 : 0;
+                            PublishRoundAnalytics(PlayerIdForTank(w), settings.playerNames[w], "");
+                        }
+                    }
                     // Host transitions state immediately; client will transition upon receiving result
-                    if (tanks[0].hp <= 0 || tanks[1].hp <= 0) { state = GameState::GAME_OVER; }
+                    if (roundOver) { state = GameState::GAME_OVER; }
                     else { state = GameState::NEXT_TURN; }
                     stateTimer = 0;
                 } else if (netMode == NetMode::CLIENT) {
@@ -3378,6 +3481,8 @@ private:
 
                 if (netMode == NetMode::HOST) {
                     NetSendTurnResult();
+                    PublishShotAnalytics();
+                    if (killed) PublishRoundAnalytics(PlayerIdForTank(currentPlayer), settings.playerNames[currentPlayer], "");
                     state = killed ? GameState::GAME_OVER : GameState::NEXT_TURN;
                     stateTimer = 0;
                 } else if (netMode == NetMode::CLIENT) {
@@ -3434,6 +3539,7 @@ private:
                 turnsSinceHit++;
                 if (turnsSinceHit >= 30) {
                     drawGame = true;
+                    if (netMode == NetMode::HOST) PublishRoundAnalytics("", "", "STALEMATE");
                     state = GameState::GAME_OVER;
                     stateTimer = 0;
                     return true;
@@ -3500,6 +3606,10 @@ private:
 
                 if (!drawGame && matchOver) {
                     // Match is decided — return to menu
+                    if (netMode == NetMode::HOST) {
+                        PublishGameAnalytics(PlayerIdForTank(winner), settings.playerNames[winner]);
+                        kafkaNet.PublishSessionComplete(gameCode);
+                    }
                     if (netMode != NetMode::NONE) { NetSend(NetMsg::DISCONNECT, {}); NetClose(); netMode = NetMode::NONE; }
                     state = GameState::MENU;
                     menuEditingName = -1;

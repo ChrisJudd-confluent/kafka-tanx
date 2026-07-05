@@ -19,7 +19,7 @@ data "confluent_environment" "env" {
 }
 
 data "confluent_kafka_cluster" "cluster" {
-  id = "pkc-41wq6"
+  id = "lkc-9kkv5o7"
   environment {
     id = data.confluent_environment.env.id
   }

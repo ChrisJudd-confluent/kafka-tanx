@@ -145,6 +145,7 @@ public:
                       const std::vector<uint8_t>& payload);
     bool PollGameplay(KafkaMsg& out, int timeoutMs = 100);
     void SubscribeGameplay(const std::string& gameCode, const std::string& playerId);
+    void UnsubscribeGameplay(); // closes the consumer without touching the producer
 
     // Player identity (kafkatanx-players)
     bool PublishPlayerProfile();

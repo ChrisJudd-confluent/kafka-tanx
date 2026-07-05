@@ -13,7 +13,7 @@ KafkaTanx is a fork of `/Users/chris/Projects/tanx` (an Amiga-style two-player t
 | Resource | Value |
 |---|---|
 | Kafka bootstrap | `pkc-41wq6.eu-west-2.aws.confluent.cloud:9092` |
-| Schema Registry | `https://psrc-zgxr5eq.eu-west2.aws.confluent.cloud` |
+| Schema Registry | `https://psrc-zgxr5eq.eu-west-2.aws.confluent.cloud` |
 | Region | AWS eu-west-2 |
 
 ---
@@ -102,11 +102,10 @@ terraform output client_ini_snippet   # paste into client-kafka.ini
 - [x] `kafka_net.h / .cpp` — full KafkaNet implementation
 - [x] `avro_codec.h` — full AvroWriter/AvroReader + AvroWire::Wrap/Unwrap
 - [x] Terraform written — topics, schemas, IAM, outputs
-- [x] `client-kafka.ini` — cluster endpoints filled, credentials still placeholder
-- [ ] **NEXT: Wire KafkaNet into kafkatanx.cpp** — replace the TCP netMode/NetSendX/NetRecvLoop section with KafkaNet calls
-- [ ] Fill API keys into client-kafka.ini (after terraform apply or manual setup)
-- [ ] Fill schema IDs into client-kafka.ini (from terraform output)
-- [ ] End-to-end test: HOST generates code → CLIENT joins → game plays → analytics appear in Confluent Cloud
+- [x] `terraform apply` run against the live cluster (env `env-7mm81w`, cluster `lkc-9kkv5o7`) — topics, schemas, service accounts, ACLs all created
+- [x] `client-kafka.ini` — cluster endpoints, API keys, and schema IDs all filled in
+- [x] KafkaNet wired into kafkatanx.cpp — TCP socket code replaced with Kafka gameplay/session pipes; HOST-only ShotEvent/RoundEvent/GameEvent analytics added. Builds cleanly; smoke-tested (launches, connects to Confluent Cloud, generates+persists player identity)
+- [ ] **NEXT: End-to-end test** — HOST generates code → CLIENT joins → game plays → analytics appear in Confluent Cloud (needs two instances/machines with a display; not yet run interactively)
 
 ---
 

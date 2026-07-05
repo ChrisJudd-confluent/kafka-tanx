@@ -1,13 +1,26 @@
 # ─── Admin API keys (used only by Terraform to create topics and schemas) ─────
+# Owned by a dedicated service account rather than a human user, so key
+# ownership doesn't depend on whoever happens to run `terraform apply`.
+
+resource "confluent_service_account" "terraform_admin" {
+  display_name = "kafkatanx-terraform-admin"
+  description  = "Service account owning Terraform-managed admin API keys (topic/schema creation)"
+}
+
+resource "confluent_role_binding" "terraform_admin_env" {
+  principal   = "User:${confluent_service_account.terraform_admin.id}"
+  role_name   = "EnvironmentAdmin"
+  crn_pattern = data.confluent_environment.env.resource_name
+}
 
 resource "confluent_api_key" "admin_kafka" {
   display_name = "kafkatanx-terraform-kafka"
   description  = "Admin Kafka API key used by Terraform to manage topics"
 
   owner {
-    id          = data.confluent_current_user.me.id
-    api_version = data.confluent_current_user.me.api_version
-    kind        = data.confluent_current_user.me.kind
+    id          = confluent_service_account.terraform_admin.id
+    api_version = confluent_service_account.terraform_admin.api_version
+    kind        = confluent_service_account.terraform_admin.kind
   }
 
   managed_resource {
@@ -19,6 +32,8 @@ resource "confluent_api_key" "admin_kafka" {
     }
   }
 
+  depends_on = [confluent_role_binding.terraform_admin_env]
+
   lifecycle {
     prevent_destroy = true
   }
@@ -29,9 +44,9 @@ resource "confluent_api_key" "admin_sr" {
   description  = "Admin Schema Registry API key used by Terraform to register schemas"
 
   owner {
-    id          = data.confluent_current_user.me.id
-    api_version = data.confluent_current_user.me.api_version
-    kind        = data.confluent_current_user.me.kind
+    id          = confluent_service_account.terraform_admin.id
+    api_version = confluent_service_account.terraform_admin.api_version
+    kind        = confluent_service_account.terraform_admin.kind
   }
 
   managed_resource {
@@ -43,12 +58,12 @@ resource "confluent_api_key" "admin_sr" {
     }
   }
 
+  depends_on = [confluent_role_binding.terraform_admin_env]
+
   lifecycle {
     prevent_destroy = true
   }
 }
-
-data "confluent_current_user" "me" {}
 
 # ─── Player service account + ACLs ────────────────────────────────────────────
 

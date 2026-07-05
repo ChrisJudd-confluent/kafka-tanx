@@ -188,6 +188,7 @@ void KafkaNet::Shutdown() {
 
 void KafkaNet::SubscribeGameplay(const std::string& gameCode,
                                   const std::string& playerId) {
+    UnsubscribeGameplay(); // avoid leaking a consumer if already subscribed to a prior session
     std::string err;
     auto* cconf = MakeBaseConf(cfg_, err);
     if (!cconf) { lastError_ = err; return; }
@@ -205,6 +206,14 @@ void KafkaNet::SubscribeGameplay(const std::string& gameCode,
 
     cons->subscribe({ std::string(KTopic::GAMEPLAY) });
     consumer_ = cons;
+}
+
+void KafkaNet::UnsubscribeGameplay() {
+    if (!consumer_) return;
+    auto* c = static_cast<RdKafka::KafkaConsumer*>(consumer_);
+    c->close();
+    delete c;
+    consumer_ = nullptr;
 }
 
 bool KafkaNet::SendGameplay(const std::string& gameCode, int32_t msgType,
