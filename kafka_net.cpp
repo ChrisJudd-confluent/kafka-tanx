@@ -143,7 +143,12 @@ static RdKafka::Conf* MakeBaseConf(const KafkaConfig& cfg, std::string& err) {
         !set("security.protocol", "SASL_SSL")           ||
         !set("sasl.mechanisms",   "PLAIN")              ||
         !set("sasl.username",     cfg.saslUsername)     ||
-        !set("sasl.password",     cfg.saslPassword)) {
+        !set("sasl.password",     cfg.saslPassword)     ||
+        // Home routers/NAT/firewalls commonly kill idle outbound TCP after
+        // 30-60s, which the lobby screen's mostly-idle wait easily exceeds.
+        // Without keepalives the dead connection isn't noticed until a real
+        // request times out (~60s later), which reads as a silent "no ack".
+        !set("socket.keepalive.enable", "true")) {
         delete conf;
         return nullptr;
     }
