@@ -1,0 +1,24 @@
+{
+  "type": "record",
+  "name": "SessionEvent",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Lifecycle event for a game session. Produced to kafkatanx-sessions (compacted, key=game_code). The latest record per key is the current session state.",
+  "fields": [
+    { "name": "game_code",        "type": "string",
+      "doc": "6-char unambiguous alphanumeric code displayed to players" },
+    { "name": "host_player_id",   "type": "string",
+      "doc": "UUID of the hosting player" },
+    { "name": "host_display_name","type": "string" },
+    { "name": "status",           "type": {
+        "type": "enum",
+        "name": "SessionStatus",
+        "symbols": ["WAITING", "ACTIVE", "COMPLETE", "ABANDONED"]
+      },
+      "doc": "WAITING=host waiting for client; ACTIVE=game in progress; COMPLETE=finished normally; ABANDONED=disconnect"
+    },
+    { "name": "created_at",       "type": "long",
+      "doc": "Epoch milliseconds when the session was first created" },
+    { "name": "settings_json",    "type": "string",
+      "doc": "JSON snapshot of GameSettings (wind, gravity, landscape, roundsToWin, startingHP, ammo). Populated when status transitions to ACTIVE." }
+  ]
+}

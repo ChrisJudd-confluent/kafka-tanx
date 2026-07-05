@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "RoundEvent",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "One event per completed round. Produced to kafkatanx-rounds by the HOST when the round resolves (key=game_code-round_number). Use for per-round duration, draw rates, and stalemate frequency.",
+  "fields": [
+    { "name": "game_code",        "type": "string" },
+    { "name": "round_number",     "type": "int" },
+    { "name": "winner_player_id", "type": ["null", "string"], "default": null,
+      "doc": "null on a draw" },
+    { "name": "winner_name",      "type": ["null", "string"], "default": null },
+    { "name": "draw_reason",      "type": ["null", "string"], "default": null,
+      "doc": "STALEMATE (30 turns no hit) | MUTUAL_KILL | null if not a draw" },
+    { "name": "turns_taken",      "type": "int",
+      "doc": "Number of player turns in this round" },
+    { "name": "shots_fired",      "type": "int",
+      "doc": "Total shots fired (excluding skipped turns)" },
+    { "name": "duration_seconds", "type": "float",
+      "doc": "Wall-clock time from round start to resolution" },
+    { "name": "ended_at",         "type": "long",
+      "doc": "Epoch milliseconds" }
+  ]
+}

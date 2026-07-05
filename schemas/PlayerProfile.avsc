@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "PlayerProfile",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Player identity record. Produced to kafkatanx-players (compacted, key=player_id) on every game launch. Flink joins other analytics topics on player_id to resolve display names, so two players sharing a name remain distinct.",
+  "fields": [
+    { "name": "player_id",      "type": "string",
+      "doc": "UUID v4, auto-generated on first launch and stored in client-kafka.ini" },
+    { "name": "display_name",   "type": "string",
+      "doc": "Human-readable name chosen by the player; may change between sessions" },
+    { "name": "first_seen",     "type": "long",
+      "doc": "Epoch milliseconds of first ever game launch (set once by the client)" },
+    { "name": "last_seen",      "type": "long",
+      "doc": "Epoch milliseconds of most recent game launch" },
+    { "name": "client_version", "type": "string",
+      "doc": "Game binary version string, e.g. '1.0.0'" }
+  ]
+}

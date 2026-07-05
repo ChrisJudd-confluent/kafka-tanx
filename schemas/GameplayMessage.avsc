@@ -1,0 +1,22 @@
+{
+  "type": "record",
+  "name": "GameplayMessage",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Operational game-traffic envelope. Produced to kafkatanx-gameplay (key=game_code). Replaces the direct TCP socket between HOST and CLIENT. The payload field carries raw bytes in the existing NetBuf wire format — unchanged from the original tanx TCP protocol.",
+  "fields": [
+    { "name": "game_code",        "type": "string",
+      "doc": "Matches the Kafka message key so consumers can filter efficiently" },
+    { "name": "sender_player_id", "type": "string",
+      "doc": "UUID of the player who produced this message" },
+    { "name": "sequence",         "type": "long",
+      "doc": "Monotonically increasing per sender; used to detect out-of-order delivery (should not happen within a partition)" },
+    { "name": "message_type",     "type": {
+        "type": "enum",
+        "name": "GameMessageType",
+        "symbols": ["MATCH_START", "ROUND_START", "TURN_ACTION", "TURN_RESULT", "DISCONNECT", "PLAYER_NAME"]
+      }
+    },
+    { "name": "payload",          "type": "bytes",
+      "doc": "Raw NetBuf-formatted game bytes. Schema is the same as the original TCP payload for the given message_type." }
+  ]
+}
