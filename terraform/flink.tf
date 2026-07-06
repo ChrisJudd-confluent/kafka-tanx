@@ -13,7 +13,10 @@ resource "confluent_flink_compute_pool" "analytics" {
   display_name = "kafkatanx-analytics-pool"
   cloud        = "AWS"
   region       = "eu-west-2"
-  max_cfu      = 5
+  # 6 continuously-running statements (session_funnel, weapon_usage,
+  # weapon_accuracy, host_advantage, move_distance, settings_outcomes) plus
+  # headroom for future ones and the occasional one-off DDL statement.
+  max_cfu      = 10
 
   environment {
     id = data.confluent_environment.env.id
@@ -83,6 +86,8 @@ locals {
     "kafkatanx-agg-weapon-usage",
     "kafkatanx-agg-weapon-accuracy",
     "kafkatanx-agg-host-advantage",
+    "kafkatanx-agg-settings-outcomes",
+    "kafkatanx-agg-move-distance",
   ]
 }
 
@@ -337,6 +342,66 @@ resource "confluent_flink_statement" "weapon_accuracy" {
 resource "confluent_flink_statement" "host_advantage" {
   statement_name = "kafkatanx-host-advantage"
   statement      = file("${path.module}/../flink/host_advantage.sql")
+  properties = {
+    "sql.current-catalog"  = local.flink_sql_catalog
+    "sql.current-database" = local.flink_sql_database
+  }
+
+  organization { id = data.confluent_organization.main.id }
+  environment  { id = data.confluent_environment.env.id }
+  compute_pool { id = confluent_flink_compute_pool.analytics.id }
+  principal    { id = confluent_service_account.flink_runner.id }
+
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = confluent_api_key.flink_runner.id
+    secret = confluent_api_key.flink_runner.secret
+  }
+
+  depends_on = [
+    confluent_kafka_acl.flink_read,
+    confluent_kafka_acl.flink_write,
+    confluent_kafka_acl.flink_describe_cluster,
+    confluent_role_binding.flink_runner_sr,
+    confluent_role_binding.flink_runner_cluster,
+  ]
+}
+
+# Cumulative outcomes per settings combination, from kafkatanx-games. No
+# windowing, so no watermark dependency — just the base ACLs/role bindings.
+resource "confluent_flink_statement" "settings_outcomes" {
+  statement_name = "kafkatanx-settings-outcomes"
+  statement      = file("${path.module}/../flink/settings_outcomes.sql")
+  properties = {
+    "sql.current-catalog"  = local.flink_sql_catalog
+    "sql.current-database" = local.flink_sql_database
+  }
+
+  organization { id = data.confluent_organization.main.id }
+  environment  { id = data.confluent_environment.env.id }
+  compute_pool { id = confluent_flink_compute_pool.analytics.id }
+  principal    { id = confluent_service_account.flink_runner.id }
+
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = confluent_api_key.flink_runner.id
+    secret = confluent_api_key.flink_runner.secret
+  }
+
+  depends_on = [
+    confluent_kafka_acl.flink_read,
+    confluent_kafka_acl.flink_write,
+    confluent_kafka_acl.flink_describe_cluster,
+    confluent_role_binding.flink_runner_sr,
+    confluent_role_binding.flink_runner_cluster,
+  ]
+}
+
+# Average move distance per tank per game, from kafkatanx-games. A plain
+# per-game transform — no windowing, no watermark dependency needed.
+resource "confluent_flink_statement" "move_distance" {
+  statement_name = "kafkatanx-move-distance"
+  statement      = file("${path.module}/../flink/move_distance.sql")
   properties = {
     "sql.current-catalog"  = local.flink_sql_catalog
     "sql.current-database" = local.flink_sql_database

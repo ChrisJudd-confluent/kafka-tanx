@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "SettingsOutcomeKey",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Key for kafkatanx-agg-settings-outcomes. One row per distinct (wind, gravity, landscape, night_mode) combination seen so far — a cumulative breakdown, not a windowed rollup, since any one combo sees few games per hour.",
+  "fields": [
+    { "name": "wind_setting",      "type": "string" },
+    { "name": "gravity_setting",   "type": "string" },
+    { "name": "landscape_setting", "type": "string" },
+    { "name": "night_mode",        "type": "boolean" }
+  ]
+}

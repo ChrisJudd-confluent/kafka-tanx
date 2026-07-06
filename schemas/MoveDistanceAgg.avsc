@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "MoveDistanceAgg",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Average move distance per tank for one completed match, from kafkatanx-games (host_moves_total/host_turns/client_moves_total/client_turns). Produced by flink/move_distance.sql. One row per game — a plain per-game transform, not a rolled-up aggregate.",
+  "fields": [
+    { "name": "game_code",                  "type": "string" },
+    { "name": "host_name",                   "type": "string" },
+    { "name": "client_name",                 "type": "string" },
+    { "name": "host_avg_move_distance",      "type": ["null", "double"], "default": null,
+      "doc": "Pixels moved per turn, averaged over the HOST's turns this match" },
+    { "name": "client_avg_move_distance",    "type": ["null", "double"], "default": null },
+    { "name": "host_turns",                  "type": "int" },
+    { "name": "client_turns",                "type": "int" }
+  ]
+}

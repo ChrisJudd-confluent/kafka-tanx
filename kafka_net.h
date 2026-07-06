@@ -105,6 +105,8 @@ struct GameEventData {
     int   roundsToWin = 0, startingHp = 0;
     int64_t startedAt = 0, endedAt = 0;
     float durationSeconds = 0;
+    int   hostMovesTotal = 0, hostTurns = 0;     // cumulative pixels moved / turns taken this match
+    int   clientMovesTotal = 0, clientTurns = 0;
 };
 
 // =============================================================================

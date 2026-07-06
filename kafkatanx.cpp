@@ -170,6 +170,13 @@ struct Tank {
 
     // Night Vision Goggles: turns remaining, 0 = inactive
     int nvgTurns = 0;
+
+    // HOST-only bookkeeping for the move-distance-per-tank data product.
+    // turnStartX is this tank's X when its current turn began; movesTotalPx/
+    // turnsTakenCount accumulate for the whole match (reset in StartNewMatch).
+    float turnStartX = 0;
+    int   movesTotalPx = 0;
+    int   turnsTakenCount = 0;
 };
 
 struct Projectile {
@@ -354,11 +361,22 @@ private:
         return (idx == localPlayer) ? kafkaConfig.playerId : remotePlayerId;
     }
 
+    // HOST-only: called exactly once per resolved turn (fire or skip), for
+    // whichever tank just acted, accumulating net |ΔX| moved since turnStartX
+    // was captured at the start of that turn (NewRound() / NEXT_TURN).
+    void RecordTurnMovement() {
+        if (netMode != NetMode::HOST) return;
+        Tank& t = tanks[currentPlayer];
+        t.movesTotalPx += (int)std::abs(t.x - t.turnStartX);
+        t.turnsTakenCount++;
+    }
+
     // Publishes one ShotEvent using the shot* members captured during FIRING
     // resolution. Called by the HOST at each of the three points a turn's
     // outcome becomes final: plain miss, explosion resolve, and laser resolve.
     void PublishShotAnalytics() {
         if (netMode != NetMode::HOST || gameCode.empty()) return;
+        RecordTurnMovement();
         int opponent = 1 - currentPlayer;
         ShotEventData ev;
         ev.gameCode         = gameCode;
@@ -427,6 +445,10 @@ private:
         ev.startedAt        = matchStartEpochMs;
         ev.endedAt          = NowEpochMs();
         ev.durationSeconds  = (float)(ev.endedAt - matchStartEpochMs) / 1000.0f;
+        ev.hostMovesTotal   = tanks[0].movesTotalPx;
+        ev.hostTurns        = tanks[0].turnsTakenCount;
+        ev.clientMovesTotal = tanks[1].movesTotalPx;
+        ev.clientTurns      = tanks[1].turnsTakenCount;
         kafkaNet.PublishGame(ev);
     }
 
@@ -1054,7 +1076,7 @@ private:
             if (surrender) { SurrenderMatch(); }
             else if (skip) {
                 // HOST received skip from CLIENT: send canonical state back then advance
-                if (netMode == NetMode::HOST) { NetSendTurnResult(); }
+                if (netMode == NetMode::HOST) { NetSendTurnResult(); RecordTurnMovement(); }
                 state = GameState::NEXT_TURN; stateTimer = 0;
             }
             else { Fire(); }  // both machines now fire simultaneously
@@ -1209,6 +1231,7 @@ private:
             tanks[i].power = 50;
             tanks[i].hp = settings.startingHP;
             tanks[i].movesLeft = settings.moveBudget;
+            tanks[i].turnStartX = tanks[i].x;
             tanks[i].shieldCharges = 0;
             tanks[i].nvgTurns = 0;
         }
@@ -1258,6 +1281,8 @@ private:
             tanks[i].ammoLaser = settings.startAmmoLaser;
             tanks[i].ammoBallistics = settings.startAmmoBallistics;
             tanks[i].ammoShield = settings.startAmmoShield;
+            tanks[i].movesTotalPx = 0;
+            tanks[i].turnsTakenCount = 0;
         }
         NewRound();
     }
@@ -3353,6 +3378,7 @@ private:
                     if (netMode == NetMode::HOST) {
                         NetSendTurnAction(true, false);
                         NetSendTurnResult();
+                        RecordTurnMovement();
                         state = GameState::NEXT_TURN; stateTimer = 0;
                     } else { // CLIENT acting: tell host, then wait for result
                         NetSendTurnAction(true, false);
@@ -3537,6 +3563,7 @@ private:
             if (stateTimer > 0.5f) {
                 currentPlayer = 1 - currentPlayer;
                 tanks[currentPlayer].movesLeft = settings.moveBudget;
+                tanks[currentPlayer].turnStartX = tanks[currentPlayer].x;
                 inputMode = InputMode::NONE;
                 inputBuffer.clear();
                 selectedWeapon = WeaponType::NORMAL;

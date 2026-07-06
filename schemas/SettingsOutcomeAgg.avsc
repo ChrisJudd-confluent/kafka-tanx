@@ -1,0 +1,14 @@
+{
+  "type": "record",
+  "name": "SettingsOutcomeAgg",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Cumulative match outcomes for one settings combination (keyed by SettingsOutcomeKey), from kafkatanx-games. Produced by flink/settings_outcomes.sql.",
+  "fields": [
+    { "name": "total_games",         "type": "long" },
+    { "name": "avg_duration_seconds", "type": ["null", "double"], "default": null },
+    { "name": "avg_rounds_played",    "type": ["null", "double"], "default": null },
+    { "name": "draws",               "type": "long" },
+    { "name": "draw_rate",           "type": ["null", "double"], "default": null,
+      "doc": "draws / total_games" }
+  ]
+}

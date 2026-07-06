@@ -30,6 +30,14 @@
       "doc": "Epoch milliseconds when MATCH_START was sent" },
     { "name": "ended_at",           "type": "long",
       "doc": "Epoch milliseconds when the match resolved" },
-    { "name": "duration_seconds",   "type": "float" }
+    { "name": "duration_seconds",   "type": "float" },
+    { "name": "host_moves_total",   "type": "int", "default": 0,
+      "doc": "Cumulative pixels moved (net |ΔX| per turn, summed) by the HOST's tank across the whole match" },
+    { "name": "host_turns",         "type": "int", "default": 0,
+      "doc": "Number of turns the HOST's tank took across the whole match" },
+    { "name": "client_moves_total", "type": "int", "default": 0,
+      "doc": "Cumulative pixels moved by the CLIENT's tank across the whole match" },
+    { "name": "client_turns",       "type": "int", "default": 0,
+      "doc": "Number of turns the CLIENT's tank took across the whole match" }
   ]
 }

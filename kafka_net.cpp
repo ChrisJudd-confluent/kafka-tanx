@@ -516,6 +516,10 @@ bool KafkaNet::PublishGame(const GameEventData& ev) {
     w.WriteLong(ev.startedAt);
     w.WriteLong(ev.endedAt);
     w.WriteFloat(ev.durationSeconds);
+    w.WriteInt(ev.hostMovesTotal);
+    w.WriteInt(ev.hostTurns);
+    w.WriteInt(ev.clientMovesTotal);
+    w.WriteInt(ev.clientTurns);
 
     auto wire = AvroWire::Wrap(cfg_.schemaIdGame, w.Data());
     p->produce(KTopic::GAMES, RdKafka::Topic::PARTITION_UA,
