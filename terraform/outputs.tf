@@ -105,3 +105,30 @@ output "flink_api_secret" {
   value       = confluent_api_key.flink_runner.secret
   sensitive   = true
 }
+
+# ─── Grafana ────────────────────────────────────────────────────────────────
+# Read-only credentials for the local Grafana Kafka datasource.
+
+output "grafana_kafka_api_key" {
+  description = "Kafka API key for the Grafana reader service account"
+  value       = confluent_api_key.grafana_kafka.id
+  sensitive   = false
+}
+
+output "grafana_kafka_api_secret" {
+  description = "Kafka API secret for the Grafana reader service account"
+  value       = confluent_api_key.grafana_kafka.secret
+  sensitive   = true
+}
+
+output "grafana_sr_api_key" {
+  description = "Schema Registry API key for the Grafana reader service account"
+  value       = confluent_api_key.grafana_sr.id
+  sensitive   = false
+}
+
+output "grafana_sr_api_secret" {
+  description = "Schema Registry API secret for the Grafana reader service account"
+  value       = confluent_api_key.grafana_sr.secret
+  sensitive   = true
+}

@@ -195,3 +195,98 @@ resource "confluent_kafka_acl" "player_consumer_group" {
     secret = confluent_api_key.admin_kafka.secret
   }
 }
+
+# ─── Grafana dashboard reader — read-only on the agg-* data product topics ────
+
+resource "confluent_service_account" "grafana_reader" {
+  display_name = "kafkatanx-grafana-reader"
+  description  = "Read-only service account for the local Grafana Kafka dashboard"
+}
+
+# Schema Registry permissions are RBAC, not ACLs — separate from the Kafka
+# ACLs below. Without this, Avro decode fails with a 403 even though the
+# Kafka-side READ ACL is in place (found by testing with kcat directly).
+resource "confluent_role_binding" "grafana_reader_sr" {
+  principal   = "User:${confluent_service_account.grafana_reader.id}"
+  role_name   = "DeveloperRead"
+  crn_pattern = "${data.confluent_schema_registry_cluster.sr.resource_name}/subject=kafkatanx-agg-*"
+}
+
+resource "confluent_api_key" "grafana_kafka" {
+  display_name = "kafkatanx-grafana-kafka"
+  description  = "Kafka credentials for the Grafana Kafka datasource"
+
+  owner {
+    id          = confluent_service_account.grafana_reader.id
+    api_version = confluent_service_account.grafana_reader.api_version
+    kind        = confluent_service_account.grafana_reader.kind
+  }
+
+  managed_resource {
+    id          = data.confluent_kafka_cluster.cluster.id
+    api_version = data.confluent_kafka_cluster.cluster.api_version
+    kind        = data.confluent_kafka_cluster.cluster.kind
+    environment {
+      id = data.confluent_environment.env.id
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "confluent_api_key" "grafana_sr" {
+  display_name = "kafkatanx-grafana-sr"
+  description  = "Schema Registry credentials for the Grafana Kafka datasource (Avro decoding)"
+
+  owner {
+    id          = confluent_service_account.grafana_reader.id
+    api_version = confluent_service_account.grafana_reader.api_version
+    kind        = confluent_service_account.grafana_reader.kind
+  }
+
+  managed_resource {
+    id          = data.confluent_schema_registry_cluster.sr.id
+    api_version = data.confluent_schema_registry_cluster.sr.api_version
+    kind        = data.confluent_schema_registry_cluster.sr.kind
+    environment {
+      id = data.confluent_environment.env.id
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+locals {
+  grafana_read_topics = [
+    "kafkatanx-agg-session-funnel",
+    "kafkatanx-agg-weapon-usage",
+    "kafkatanx-agg-weapon-accuracy",
+    "kafkatanx-agg-host-advantage",
+    "kafkatanx-agg-settings-outcomes",
+    "kafkatanx-agg-move-distance",
+  ]
+}
+
+resource "confluent_kafka_acl" "grafana_read" {
+  for_each = toset(local.grafana_read_topics)
+
+  kafka_cluster {
+    id = data.confluent_kafka_cluster.cluster.id
+  }
+  resource_type = "TOPIC"
+  resource_name = each.value
+  pattern_type  = "LITERAL"
+  principal     = "User:${confluent_service_account.grafana_reader.id}"
+  host          = "*"
+  operation     = "READ"
+  permission    = "ALLOW"
+  rest_endpoint = data.confluent_kafka_cluster.cluster.rest_endpoint
+  credentials {
+    key    = confluent_api_key.admin_kafka.id
+    secret = confluent_api_key.admin_kafka.secret
+  }
+}
