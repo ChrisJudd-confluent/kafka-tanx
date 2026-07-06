@@ -1,0 +1,14 @@
+{
+  "type": "record",
+  "name": "HostAdvantageAgg",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Cumulative all-time host-vs-client win rate, from kafkatanx-games. Produced by the Flink SQL statement in flink/host_advantage.sql. Single continuously-updating row, keyed by HostAdvantageKey (id='all_time').",
+  "fields": [
+    { "name": "host_wins",     "type": "long" },
+    { "name": "client_wins",   "type": "long" },
+    { "name": "draws",         "type": "long" },
+    { "name": "total_games",   "type": "long" },
+    { "name": "host_win_rate", "type": ["null", "double"], "default": null,
+      "doc": "host_wins / (host_wins + client_wins), excluding draws. Null until at least one decisive game has completed." }
+  ]
+}

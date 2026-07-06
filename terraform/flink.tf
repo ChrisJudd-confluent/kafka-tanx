@@ -70,17 +70,19 @@ resource "confluent_api_key" "flink_runner" {
   depends_on = [confluent_role_binding.flink_runner_developer]
 }
 
-# ─── Kafka ACLs — read the two source topics, write the three output topics ──
+# ─── Kafka ACLs — read the source topics, write the output topics ────────────
 
 locals {
   flink_read_topics = [
     "kafkatanx-sessions",
     "kafkatanx-shots",
+    "kafkatanx-games",
   ]
   flink_write_topics = [
     "kafkatanx-agg-session-funnel",
     "kafkatanx-agg-weapon-usage",
     "kafkatanx-agg-weapon-accuracy",
+    "kafkatanx-agg-host-advantage",
   ]
 }
 
@@ -328,4 +330,34 @@ resource "confluent_flink_statement" "weapon_accuracy" {
   }
 
   depends_on = [confluent_flink_statement.set_watermark_shots]
+}
+
+# Cumulative host-vs-client win rate, from kafkatanx-games. No windowing, so
+# no watermark dependency — just the base ACLs/role bindings.
+resource "confluent_flink_statement" "host_advantage" {
+  statement_name = "kafkatanx-host-advantage"
+  statement      = file("${path.module}/../flink/host_advantage.sql")
+  properties = {
+    "sql.current-catalog"  = local.flink_sql_catalog
+    "sql.current-database" = local.flink_sql_database
+  }
+
+  organization { id = data.confluent_organization.main.id }
+  environment  { id = data.confluent_environment.env.id }
+  compute_pool { id = confluent_flink_compute_pool.analytics.id }
+  principal    { id = confluent_service_account.flink_runner.id }
+
+  rest_endpoint = data.confluent_flink_region.main.rest_endpoint
+  credentials {
+    key    = confluent_api_key.flink_runner.id
+    secret = confluent_api_key.flink_runner.secret
+  }
+
+  depends_on = [
+    confluent_kafka_acl.flink_read,
+    confluent_kafka_acl.flink_write,
+    confluent_kafka_acl.flink_describe_cluster,
+    confluent_role_binding.flink_runner_sr,
+    confluent_role_binding.flink_runner_cluster,
+  ]
 }

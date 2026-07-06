@@ -213,6 +213,29 @@ resource "confluent_kafka_topic" "agg_weapon_accuracy" {
   }
 }
 
+# Cumulative host-vs-client win rate — a continuously-updating single row
+# (id='all_time'), not a windowed rollup, so this topic is compacted and
+# keyed (unlike the three windowed agg topics above, which are keyless).
+resource "confluent_kafka_topic" "agg_host_advantage" {
+  topic_name       = "kafkatanx-agg-host-advantage"
+  partitions_count = 1
+  rest_endpoint    = data.confluent_kafka_cluster.cluster.rest_endpoint
+
+  config = {
+    "cleanup.policy"        = "compact"
+    "retention.ms"          = "-1"
+    "min.compaction.lag.ms" = "0"
+  }
+
+  kafka_cluster {
+    id = data.confluent_kafka_cluster.cluster.id
+  }
+  credentials {
+    key    = confluent_api_key.admin_kafka.id
+    secret = confluent_api_key.admin_kafka.secret
+  }
+}
+
 # ─── Schemas ─────────────────────────────────────────────────────────────────
 # Schema files are read from ../schemas/ relative to this terraform/ dir.
 # The schema_registry_cluster REST endpoint is resolved from the data source.
@@ -341,6 +364,36 @@ resource "confluent_schema" "agg_weapon_accuracy" {
   subject_name = "kafkatanx-agg-weapon-accuracy-value"
   format       = "AVRO"
   schema       = file("${path.module}/../schemas/WeaponAccuracyAgg.avsc")
+
+  schema_registry_cluster {
+    id = data.confluent_schema_registry_cluster.sr.id
+  }
+  rest_endpoint = data.confluent_schema_registry_cluster.sr.rest_endpoint
+  credentials {
+    key    = confluent_api_key.admin_sr.id
+    secret = confluent_api_key.admin_sr.secret
+  }
+}
+
+resource "confluent_schema" "agg_host_advantage_key" {
+  subject_name = "kafkatanx-agg-host-advantage-key"
+  format       = "AVRO"
+  schema       = file("${path.module}/../schemas/HostAdvantageKey.avsc")
+
+  schema_registry_cluster {
+    id = data.confluent_schema_registry_cluster.sr.id
+  }
+  rest_endpoint = data.confluent_schema_registry_cluster.sr.rest_endpoint
+  credentials {
+    key    = confluent_api_key.admin_sr.id
+    secret = confluent_api_key.admin_sr.secret
+  }
+}
+
+resource "confluent_schema" "agg_host_advantage_value" {
+  subject_name = "kafkatanx-agg-host-advantage-value"
+  format       = "AVRO"
+  schema       = file("${path.module}/../schemas/HostAdvantageAgg.avsc")
 
   schema_registry_cluster {
     id = data.confluent_schema_registry_cluster.sr.id

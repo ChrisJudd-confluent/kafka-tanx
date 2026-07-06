@@ -1,0 +1,9 @@
+{
+  "type": "record",
+  "name": "HostAdvantageKey",
+  "namespace": "io.confluent.kafkatanx",
+  "doc": "Key for kafkatanx-agg-host-advantage. There is only ever one row (id='all_time') — this is a continuously-updating cumulative stat, not a windowed rollup like the other data products.",
+  "fields": [
+    { "name": "id", "type": "string" }
+  ]
+}
