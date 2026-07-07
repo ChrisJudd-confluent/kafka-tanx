@@ -1,6 +1,6 @@
 # KafkaTanx
 
-A two-player turn-based tank artillery game — a fork of [TANX](../tanx) where the
+A two-player turn-based tank artillery game — a fork of [TANX](https://github.com/wingsuitchris-del/tanx) where the
 local LAN TCP networking has been replaced with **Apache Kafka topics on
 [Confluent Cloud](https://confluent.cloud)**.
 
@@ -298,7 +298,7 @@ GROUP BY weapon;
 - Audio powered by [miniaudio](https://miniaud.io) by David Reid
 - Kafka client: [librdkafka](https://github.com/confluentinc/librdkafka) by Confluent
 - Inspired by *Tanx* (1991) by Gary Roberts
-- Original base game: [TANX](../tanx)
+- Original base game: [TANX](https://github.com/wingsuitchris-del/tanx)
 
 See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full licence details.
 
