@@ -1,6 +1,6 @@
 TARGET = kafkatanx
-SRCS   = kafkatanx.cpp kafka_net.cpp avro_codec.cpp
-DEPS   = $(SRCS) kafka_net.h avro_codec.h olcPixelGameEngine.h miniaudio.h
+SRCS   = kafkatanx.cpp kafka_net.cpp avro_codec.cpp logger.cpp
+DEPS   = $(SRCS) kafka_net.h avro_codec.h logger.h olcPixelGameEngine.h miniaudio.h
 
 # =============================================================================
 # Platform detection

@@ -20,6 +20,9 @@ desktop.ini
 # Runtime-generated sound files
 *.wav
 
+# Connection log (kafkatanx.log) — local diagnostics only, never committed
+*.log
+
 # Terraform
 terraform/terraform.tfvars
 terraform/.terraform/

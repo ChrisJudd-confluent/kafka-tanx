@@ -1,5 +1,6 @@
 #include "kafka_net.h"
 #include "avro_codec.h"
+#include "logger.h"
 #include <librdkafka/rdkafkacpp.h>
 #include <fstream>
 #include <sstream>
@@ -146,8 +147,10 @@ class KafkaEventCb : public RdKafka::EventCb {
 public:
     explicit KafkaEventCb(std::string* errorSink) : errorSink_(errorSink) {}
     void event_cb(RdKafka::Event& event) override {
-        if (event.type() == RdKafka::Event::EVENT_ERROR)
+        if (event.type() == RdKafka::Event::EVENT_ERROR) {
             *errorSink_ = "Kafka connection error: " + RdKafka::err2str(event.err());
+            NetLog::Write("EVENT_ERROR " + RdKafka::err2str(event.err()) + ": " + event.str());
+        }
     }
 private:
     std::string* errorSink_;
@@ -157,8 +160,10 @@ class KafkaDeliveryCb : public RdKafka::DeliveryReportCb {
 public:
     explicit KafkaDeliveryCb(std::string* errorSink) : errorSink_(errorSink) {}
     void dr_cb(RdKafka::Message& message) override {
-        if (message.err() != RdKafka::ERR_NO_ERROR)
+        if (message.err() != RdKafka::ERR_NO_ERROR) {
             *errorSink_ = "Message delivery failed: " + message.errstr();
+            NetLog::Write("DELIVERY FAILED: " + message.errstr());
+        }
     }
 private:
     std::string* errorSink_;
@@ -200,15 +205,16 @@ bool KafkaNet::Init(const KafkaConfig& cfg) {
     deliveryCb_ = deliveryCb;
 
     auto* pconf = MakeBaseConf(cfg, err, eventCb);
-    if (!pconf) { lastError_ = "Producer conf: " + err; return false; }
+    if (!pconf) { lastError_ = "Producer conf: " + err; NetLog::Write("Init FAILED: producer conf: " + err); return false; }
     pconf->set("dr_cb", deliveryCb, err);
 
     auto* prod = RdKafka::Producer::create(pconf, err);
     delete pconf;
-    if (!prod) { lastError_ = "Producer create: " + err; return false; }
+    if (!prod) { lastError_ = "Producer create: " + err; NetLog::Write("Init FAILED: producer create: " + err); return false; }
 
     producer_ = prod;
     ready_    = true;
+    NetLog::Write("Init OK — producer ready, bootstrap=" + cfg.bootstrapServers);
     return true;
 }
 
@@ -230,6 +236,7 @@ void KafkaNet::Shutdown() {
     delete static_cast<RdKafka::DeliveryReportCb*>(deliveryCb_);
     deliveryCb_ = nullptr;
     ready_ = false;
+    NetLog::Write("Shutdown");
 }
 
 // ---------------------------------------------------------------------------
@@ -241,21 +248,30 @@ void KafkaNet::SubscribeGameplay(const std::string& gameCode,
     UnsubscribeGameplay(); // avoid leaking a consumer if already subscribed to a prior session
     std::string err;
     auto* cconf = MakeBaseConf(cfg_, err, static_cast<RdKafka::EventCb*>(eventCb_));
-    if (!cconf) { lastError_ = err; return; }
+    if (!cconf) { lastError_ = err; NetLog::Write("SubscribeGameplay FAILED (conf): " + err); return; }
 
     // Unique consumer group per player per game — both players receive all messages.
     std::string groupId = "kafkatanx-" + gameCode + "-" + playerId;
     cconf->set("group.id",             groupId,    err);
     cconf->set("auto.offset.reset",    "earliest", err);
     cconf->set("enable.auto.commit",   "true",     err);
-    cconf->set("session.timeout.ms",   "10000",    err);
+    // 30s rather than the default 10s: this consumer is alone in its group
+    // (unique per session), so there's no rebalance-contention downside to
+    // giving it more slack — only upside, since a brief wifi/NAT blip on
+    // either player's side shouldn't evict group membership and force a
+    // rejoin mid-match. The app's own PING/silence timeout (NetUpdate() in
+    // kafkatanx.cpp) is the real liveness signal for "opponent is gone";
+    // this just stops the consumer's own plumbing from adding false drops
+    // on top of that.
+    cconf->set("session.timeout.ms",   "30000",    err);
 
     auto* cons = RdKafka::KafkaConsumer::create(cconf, err);
     delete cconf;
-    if (!cons) { lastError_ = "Consumer create: " + err; return; }
+    if (!cons) { lastError_ = "Consumer create: " + err; NetLog::Write("SubscribeGameplay FAILED (create): " + err); return; }
 
     cons->subscribe({ std::string(KTopic::GAMEPLAY) });
     consumer_ = cons;
+    NetLog::Write("Subscribed gameCode=" + gameCode + " group=" + groupId);
 }
 
 void KafkaNet::UnsubscribeGameplay() {
@@ -264,6 +280,7 @@ void KafkaNet::UnsubscribeGameplay() {
     c->close();
     delete c;
     consumer_ = nullptr;
+    NetLog::Write("Unsubscribed gameplay consumer");
 }
 
 bool KafkaNet::SendGameplay(const std::string& gameCode, int32_t msgType,
@@ -291,6 +308,8 @@ bool KafkaNet::SendGameplay(const std::string& gameCode, int32_t msgType,
 
     if (rc != RdKafka::ERR_NO_ERROR) {
         lastError_ = RdKafka::err2str(rc);
+        NetLog::Write("SendGameplay FAILED type=" + std::to_string(msgType) +
+                      " gameCode=" + gameCode + ": " + RdKafka::err2str(rc));
         return false;
     }
     return true;
@@ -304,8 +323,10 @@ bool KafkaNet::PollGameplay(KafkaMsg& out, int timeoutMs) {
     if (!msg) return false;
 
     if (msg->err()) {
-        if (msg->err() != RdKafka::ERR__TIMED_OUT)
+        if (msg->err() != RdKafka::ERR__TIMED_OUT) {
             lastError_ = msg->errstr();
+            NetLog::Write("PollGameplay consume error: " + msg->errstr());
+        }
         delete msg;
         return false;
     }

@@ -23,6 +23,7 @@
 #include "miniaudio.h"
 
 #include "kafka_net.h"
+#include "logger.h"
 
 // --- Network message protocol -----------------------------------------------
 // Portable big-endian byte-swap helpers (NetBuf/NetReader payloads are shipped
@@ -88,8 +89,14 @@ constexpr int MAX_POWER = 100;
 
 // Liveness: send a PING this often; declare the peer gone if nothing at all
 // (game traffic or PING) has arrived for this long.
-constexpr float NET_HEARTBEAT_INTERVAL_S = 5.0f;
-constexpr float NET_DISCONNECT_TIMEOUT_S = 15.0f;
+// Timeout was 15s, widened to 25s after a live demo saw 3 dropped connections
+// in 4 games: the consumer's own session.timeout.ms (10s, now 30s — see
+// SubscribeGameplay in kafka_net.cpp) left almost no margin, so a single wifi
+// blip of just a few seconds could both evict the consumer from its group
+// *and* trip this timeout around the same moment. 25s gives real headroom
+// for a transient blip to recover before the app gives up on the peer.
+constexpr float NET_HEARTBEAT_INTERVAL_S = 4.0f;
+constexpr float NET_DISCONNECT_TIMEOUT_S = 25.0f;
 
 // --- Game state machine -----------------------------------------------------
 // TITLE -> MENU -> AIM <-> FIRING -> EXPLOSION -> NEXT_TURN -> AIM ...
@@ -316,6 +323,7 @@ private:
     float         netLobbyBlink = 0;
     int64_t       netLastRemoteSeq = -1;         // highest KafkaMsg::sequence accepted from the peer this session
     float         netPeerSilence = 0;            // seconds since any message (game traffic or PING) arrived from the peer
+    float         netSilenceWarned = 0;          // highest silence threshold already logged this session, resets to 0 on contact
     float         netHeartbeatTimer = 0;         // seconds since we last sent a PING
     bool          netDisconnected = false;       // set by NetUpdate() when the peer times out; consumed by OnUserUpdate
     std::string   netError;                      // current error banner text, empty = none
@@ -788,6 +796,7 @@ private:
     void SetNetError(const std::string& msg) {
         netError = msg;
         netErrorTimer = 6.0f;
+        NetLog::Write("NET ERROR (shown to player): " + msg);
     }
 
     // Publish one message on kafkatanx-gameplay for the active session.
@@ -827,9 +836,14 @@ private:
 
             // Any message at all from the opponent (including a PING) means
             // they're present — there's no TCP handshake to detect this via anymore.
+            if (!netConnected)
+                NetLog::Write("Peer first contact: " + msg.senderPlayerId + " gameCode=" + gameCode);
+            else if (netPeerSilence > 2.0f)
+                NetLog::Write("Peer recovered after " + std::to_string(netPeerSilence) + "s silence");
             netConnected = true;
             remotePlayerId = msg.senderPlayerId;
             netPeerSilence = 0;
+            netSilenceWarned = 0;
 
             if ((NetMsg)msg.messageType != NetMsg::PING)
                 NetHandleMessage((NetMsg)msg.messageType, msg.payload);
@@ -837,7 +851,21 @@ private:
 
         if (netConnected) {
             netPeerSilence += frameTime;
+            // Log once per threshold crossed so a post-mortem shows the
+            // silence ramping up (steady vs. a sudden cliff) rather than
+            // just the final "gave up" line.
+            if (netPeerSilence >= 10.0f && netSilenceWarned < 10.0f) {
+                netSilenceWarned = 10.0f;
+                NetLog::Write("WARNING: no message from peer in 10s (gameCode=" + gameCode + ")");
+            } else if (netPeerSilence >= 5.0f && netSilenceWarned < 5.0f) {
+                netSilenceWarned = 5.0f;
+                NetLog::Write("no message from peer in 5s (gameCode=" + gameCode + ")");
+            }
             if (netPeerSilence >= NET_DISCONNECT_TIMEOUT_S) {
+                NetLog::Write("DISCONNECT: peer silent for " + std::to_string(netPeerSilence) +
+                              "s, giving up (gameCode=" + gameCode + ", peer=" + remotePlayerId +
+                              ", mode=" + (netMode == NetMode::HOST ? "HOST" : "CLIENT") +
+                              ", lastKafkaError=" + (kafkaNet.LastError().empty() ? "(none)" : kafkaNet.LastError()) + ")");
                 if (netMode == NetMode::HOST) kafkaNet.PublishSessionAbandoned(gameCode);
                 NetClose();
                 netMode = NetMode::NONE;
@@ -847,12 +875,14 @@ private:
     }
 
     void NetClose() {
+        if (!gameCode.empty()) NetLog::Write("NetClose gameCode=" + gameCode);
         kafkaNet.UnsubscribeGameplay();
         netConnected = false;
         gameCode.clear();
         remotePlayerId.clear();
         netLastRemoteSeq = -1;
         netPeerSilence = 0;
+        netSilenceWarned = 0;
         netHeartbeatTimer = 0;
     }
 
@@ -864,12 +894,14 @@ private:
             return false;
         }
         gameCode = KafkaConfig::GenerateGameCode();
+        NetLog::Write("NetStartHost gameCode=" + gameCode + " playerId=" + kafkaConfig.playerId);
         kafkaNet.PublishPlayerProfile();
         kafkaNet.PublishSessionWaiting(gameCode);
         kafkaNet.SubscribeGameplay(gameCode, kafkaConfig.playerId);
         localPlayer = 0;
         netLastRemoteSeq = -1;
         netPeerSilence = 0;
+        netSilenceWarned = 0;
         netHeartbeatTimer = 0;
         return true;
     }
@@ -882,12 +914,14 @@ private:
             return false;
         }
         gameCode = code;
+        NetLog::Write("NetJoinGame gameCode=" + gameCode + " playerId=" + kafkaConfig.playerId);
         kafkaNet.PublishPlayerProfile();
         kafkaNet.SubscribeGameplay(gameCode, kafkaConfig.playerId);
         localPlayer = 1;
         netConnected = true; // optimistic — no handshake to wait for
         netLastRemoteSeq = -1;
         netPeerSilence = 0;
+        netSilenceWarned = 0;
         netHeartbeatTimer = 0;
         NetBuf b; b.writeStr(settings.playerNames[1]);
         NetSend(NetMsg::PLAYER_NAME, b.data);
@@ -1154,6 +1188,13 @@ private:
 
     bool OnUserCreate() override {
         srand((unsigned)time(nullptr));
+
+        // Persistent connection log — kafkatanx.log next to the executable.
+        // Everything the ephemeral on-screen netError banner shows (plus the
+        // Kafka-level detail behind it) is also written here so a disconnect
+        // can be diagnosed after the fact instead of only during the 6s it's
+        // on screen.
+        NetLog::Init("kafkatanx.log");
 
         // Kafka identity + connection — the producer lives for the whole app
         // run; the consumer is subscribed/unsubscribed per session (NetStartHost/NetJoinGame/NetClose).
