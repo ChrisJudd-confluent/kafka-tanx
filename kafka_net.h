@@ -180,6 +180,7 @@ private:
     // these, connection/auth/delivery failures are only visible in librdkafka's
     // own stderr logging, which a packaged binary with no attached terminal
     // never shows anyone.
-    void* eventCb_    = nullptr;
-    void* deliveryCb_ = nullptr;
+    void* eventCb_     = nullptr;
+    void* deliveryCb_  = nullptr;
+    void* rebalanceCb_ = nullptr;
 };

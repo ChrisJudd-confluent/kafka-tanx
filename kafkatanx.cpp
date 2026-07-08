@@ -836,9 +836,12 @@ private:
 
             // Any message at all from the opponent (including a PING) means
             // they're present — there's no TCP handshake to detect this via anymore.
+            // Only worth a log line once a full heartbeat cycle was missed —
+            // gaps up to ~NET_HEARTBEAT_INTERVAL_S are the normal PING cadence,
+            // not a recovery, and logging every cycle just drowns out real gaps.
             if (!netConnected)
                 NetLog::Write("Peer first contact: " + msg.senderPlayerId + " gameCode=" + gameCode);
-            else if (netPeerSilence > 2.0f)
+            else if (netPeerSilence > NET_HEARTBEAT_INTERVAL_S * 1.5f)
                 NetLog::Write("Peer recovered after " + std::to_string(netPeerSilence) + "s silence");
             netConnected = true;
             remotePlayerId = msg.senderPlayerId;

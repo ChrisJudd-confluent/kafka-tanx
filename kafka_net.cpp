@@ -169,6 +169,30 @@ private:
     std::string* errorSink_;
 };
 
+// Without a rebalance_cb, librdkafka silently assigns/revokes partitions on
+// our behalf — if the broker ever evicts this consumer from its (unique,
+// single-member) group, message delivery would just stop with nothing in
+// the log to explain why. This registers our own handler purely for
+// visibility and mirrors librdkafka's default assign/unassign behavior
+// exactly, so consumption itself is unaffected.
+class KafkaRebalanceCb : public RdKafka::RebalanceCb {
+public:
+    void rebalance_cb(RdKafka::KafkaConsumer* consumer, RdKafka::ErrorCode err,
+                       std::vector<RdKafka::TopicPartition*>& partitions) override {
+        if (err == RdKafka::ERR__ASSIGN_PARTITIONS) {
+            NetLog::Write("Consumer group rebalance: partitions ASSIGNED (" +
+                          std::to_string(partitions.size()) + ")");
+            consumer->assign(partitions);
+        } else if (err == RdKafka::ERR__REVOKE_PARTITIONS) {
+            NetLog::Write("Consumer group rebalance: partitions REVOKED (" +
+                          std::to_string(partitions.size()) + ")");
+            consumer->unassign();
+        } else {
+            NetLog::Write("Consumer group rebalance error: " + RdKafka::err2str(err));
+        }
+    }
+};
+
 }  // namespace
 
 // Builds a base rdkafka configuration with SASL_SSL credentials.
@@ -199,10 +223,12 @@ bool KafkaNet::Init(const KafkaConfig& cfg) {
     cfg_ = cfg;
     std::string err;
 
-    auto* eventCb    = new KafkaEventCb(&lastError_);
-    auto* deliveryCb = new KafkaDeliveryCb(&lastError_);
-    eventCb_    = eventCb;
-    deliveryCb_ = deliveryCb;
+    auto* eventCb     = new KafkaEventCb(&lastError_);
+    auto* deliveryCb  = new KafkaDeliveryCb(&lastError_);
+    auto* rebalanceCb = new KafkaRebalanceCb();
+    eventCb_     = eventCb;
+    deliveryCb_  = deliveryCb;
+    rebalanceCb_ = rebalanceCb;
 
     auto* pconf = MakeBaseConf(cfg, err, eventCb);
     if (!pconf) { lastError_ = "Producer conf: " + err; NetLog::Write("Init FAILED: producer conf: " + err); return false; }
@@ -235,6 +261,8 @@ void KafkaNet::Shutdown() {
     eventCb_ = nullptr;
     delete static_cast<RdKafka::DeliveryReportCb*>(deliveryCb_);
     deliveryCb_ = nullptr;
+    delete static_cast<RdKafka::RebalanceCb*>(rebalanceCb_);
+    rebalanceCb_ = nullptr;
     ready_ = false;
     NetLog::Write("Shutdown");
 }
@@ -264,6 +292,7 @@ void KafkaNet::SubscribeGameplay(const std::string& gameCode,
     // this just stops the consumer's own plumbing from adding false drops
     // on top of that.
     cconf->set("session.timeout.ms",   "30000",    err);
+    cconf->set("rebalance_cb", static_cast<RdKafka::RebalanceCb*>(rebalanceCb_), err);
 
     auto* cons = RdKafka::KafkaConsumer::create(cconf, err);
     delete cconf;
