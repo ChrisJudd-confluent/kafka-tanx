@@ -254,6 +254,10 @@ private:
     int   shakeOffY  = 0;
     olc::Sprite* pFrameBuf = nullptr; // full-screen render target; blit with offset
 
+    // -- Title screen logo (img/KafkaTank.png) --
+    olc::Renderable titleLogo;
+    bool titleLogoLoaded = false;
+
     // -- Easter egg: name yourself "Daddy" and triple-click during your turn
     // to toggle a perfect trajectory preview line for that tank --
     int cheatClickCount = 0;
@@ -1179,6 +1183,7 @@ private:
 
         // Cross-platform audio engine (miniaudio) and pre-generated one-shot sounds
         pFrameBuf = new olc::Sprite(SCREEN_W, SCREEN_H);
+        titleLogoLoaded = (titleLogo.Load("img/KafkaTank.png") == olc::OK);
         ma_engine_init(NULL, &audioEngine);
 
         explosionWavPath = GetTempFilePath("tanx_explosion.wav");
@@ -3152,16 +3157,27 @@ private:
     void DrawTitleScreen() {
         Clear(olc::BLACK);
 
-        DrawString(SCREEN_W / 2 - 200, 150, "KafkaTanx!", olc::Pixel(255, 200, 0), 5);
-        DrawString(SCREEN_W / 2 - 140, 250, "A Classic Artillery Game", olc::Pixel(180, 180, 180), 2);
+        if (titleLogoLoaded) {
+            // Slow bounce (vertical) + mild sway (rotation) — gentle, not distracting
+            float bounceY = sin(stateTimer * 1.2f) * 8.0f;
+            float swayAngle = sin(stateTimer * 0.8f + 1.0f) * 0.05f;
+            olc::Sprite* s = titleLogo.Sprite();
+            float scale = 300.0f / (float)s->width;
+            olc::vf2d center = { (float)s->width / 2.0f, (float)s->height / 2.0f };
+            olc::vf2d pos = { (float)SCREEN_W / 2.0f, 260.0f + bounceY };
+            DrawRotatedDecal(pos, titleLogo.Decal(), swayAngle, center, { scale, scale });
+        } else {
+            DrawString(SCREEN_W / 2 - 200, 150, "KafkaTanx!", olc::Pixel(255, 200, 0), 5);
+        }
+        DrawString(SCREEN_W / 2 - 140, 430, "A Classic Artillery Game", olc::Pixel(180, 180, 180), 2);
 
         float pulse = (sin(stateTimer * 3.0f) + 1.0f) * 0.5f;
         olc::Pixel startCol = olc::Pixel(
             (int)(100 + 155 * pulse), (int)(200 * pulse), (int)(50 + 50 * pulse));
-        DrawString(SCREEN_W / 2 - 120, 350, "PRESS SPACE TO START", startCol, 2);
+        DrawString(SCREEN_W / 2 - 120, 490, "PRESS SPACE TO START", startCol, 2);
 
-        DrawString(SCREEN_W / 2 - 100, 450, "Inspired by TANX (1991)", olc::Pixel(120, 120, 120));
-        DrawString(SCREEN_W / 2 - 68, 470, "by Gary Roberts", olc::Pixel(120, 120, 120));
+        DrawString(SCREEN_W / 2 - 100, 560, "Inspired by TANX (1991)", olc::Pixel(120, 120, 120));
+        DrawString(SCREEN_W / 2 - 68, 580, "by Gary Roberts", olc::Pixel(120, 120, 120));
     }
 
     // Small banner for netError — call from any screen where a Kafka failure
