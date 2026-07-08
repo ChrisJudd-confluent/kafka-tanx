@@ -327,15 +327,17 @@ bool KafkaNet::PollGameplay(KafkaMsg& out, int timeoutMs) {
         out.messageType    = r.ReadEnum();
         out.payload        = r.ReadBytes();
         decoded = r.Ok();
-    } else if (unwrapped) {
-        // Message is well-formed but tagged with a different schema ID than
-        // this client's client-kafka.ini expects — could be another tester
-        // on a stale/mismatched clone, or this client's own ini going stale
-        // after a schema re-registration. Silently dropping it (as before)
-        // is safe, but invisible; at least make it discoverable.
-        lastError_ = "Gameplay message schema ID mismatch: got " + std::to_string(schemaId)
-                   + ", expected " + std::to_string(cfg_.schemaIdGameplay);
     }
+    // Note: a schema ID mismatch here is NOT surfaced as an error. Every fresh
+    // session subscribes from `earliest` on the shared kafkatanx-gameplay topic
+    // (24h retention), so a brand-new HOST with no opponent yet routinely
+    // replays old messages from other sessions — including ones tagged with a
+    // since-superseded schema ID after any schema bump. That's expected
+    // background noise, not a live problem, and there's no way to tell the two
+    // apart here (a mismatched schema can't even be decoded far enough to check
+    // whether it belongs to this gameCode). A genuinely unreachable/incompatible
+    // opponent is already caught by the heartbeat/disconnect-timeout mechanism
+    // in NetUpdate(), which is a much clearer signal than a schema ID number.
 
     delete msg;
     return decoded;
