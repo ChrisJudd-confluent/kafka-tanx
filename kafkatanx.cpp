@@ -1892,13 +1892,16 @@ private:
     }
 
     // Draw a small bevelled HUD button. Returns true if mouse is held over it.
-    bool DrawHudButton(int x, int y, const std::string& label) {
+    bool DrawHudButton(int x, int y, const std::string& label, bool enabled = true) {
         int w = 20, h = 16;
-        bool hovering = GetMouseX() >= x && GetMouseX() < x + w
+        bool hovering = enabled && GetMouseX() >= x && GetMouseX() < x + w
                      && GetMouseY() >= y && GetMouseY() < y + h;
         bool pressed = hovering && GetMouse(0).bHeld;
 
-        if (pressed) {
+        if (!enabled) {
+            FillRect(x, y, w, h, olc::Pixel(45, 40, 32));
+            DrawRect(x, y, w - 1, h - 1, olc::Pixel(70, 60, 48));
+        } else if (pressed) {
             FillRect(x, y, w, h, olc::Pixel(40, 30, 15));
             DrawLine(x, y, x + w - 1, y, olc::Pixel(50, 30, 15));
             DrawLine(x, y, x, y + h - 1, olc::Pixel(50, 30, 15));
@@ -1912,7 +1915,7 @@ private:
             DrawLine(x + w - 1, y, x + w - 1, y + h - 1, olc::Pixel(40, 25, 10));
         }
         int textX = x + (w - (int)label.length() * 8) / 2;
-        DrawString(textX, y + 4, label, olc::WHITE);
+        DrawString(textX, y + 4, label, enabled ? olc::WHITE : olc::Pixel(110, 100, 90));
 
         return pressed;
     }
@@ -2314,6 +2317,31 @@ private:
             playerIdx == 0 ? olc::Pixel(100, 200, 100) : olc::Pixel(200, 100, 100));
     }
 
+    // Thick bouncing arrow over whichever tank is acting this turn — driven by
+    // worldTime (not stateTimer) so the bounce doesn't reset/stutter across
+    // the AIM -> FIRING -> EXPLOSION -> NEXT_TURN state churn within one turn.
+    void DrawTurnArrow(int playerIdx) {
+        const Tank& t = tanks[playerIdx];
+        int tx = (int)t.x;
+        int bodyTop = (int)t.y - TANK_HEIGHT;
+        int bounce = (int)(sin(worldTime * 3.0f) * 6.0f);
+
+        int tipY = bodyTop - 30 + bounce;   // bottom point of the arrowhead
+        int headH = 12, headW = 9;
+        olc::Pixel fill = olc::Pixel(255, 220, 40);
+        olc::Pixel outline = olc::Pixel(140, 95, 10);
+
+        for (int dy = 0; dy < headH; dy++) {
+            int half = headW - (headW * dy / headH);
+            DrawLine(tx - half, tipY - headH + dy, tx + half, tipY - headH + dy, fill);
+        }
+        DrawLine(tx - headW, tipY - headH, tx, tipY, outline);
+        DrawLine(tx + headW, tipY - headH, tx, tipY, outline);
+
+        FillRect(tx - 4, tipY - headH - 10, 8, 10, fill);
+        DrawRect(tx - 4, tipY - headH - 10, 7, 9, outline);
+    }
+
     // Damage smoke rising from a tank that is on its last HP.
     // Uses worldTime to animate puffs cycling upward — no extra state needed.
     // =========================================================================
@@ -2643,10 +2671,10 @@ private:
             if (fmod(cursorBlink, 0.8f) < 0.4f) display += "_";
             DrawString(leftCol + 58, row1, display, olc::Pixel(100, 200, 255));
         } else {
-            amHeld = DrawHudButton(leftCol + 56, row1 - 3, "-");
+            amHeld = DrawHudButton(leftCol + 56, row1 - 3, "-", IsLocalTurn());
             FillRect(leftCol + 78, row1 - 2, 30, 14, olc::Pixel(20, 15, 10));
             DrawString(leftCol + 80, row1 + 1, std::to_string(t.angle), valCol);
-            apHeld = DrawHudButton(leftCol + 110, row1 - 3, "+");
+            apHeld = DrawHudButton(leftCol + 110, row1 - 3, "+", IsLocalTurn());
             DrawString(leftCol + 134, row1, "deg", olc::Pixel(150, 150, 150));
         }
 
@@ -2659,16 +2687,18 @@ private:
             if (fmod(cursorBlink, 0.8f) < 0.4f) display += "_";
             DrawString(leftCol + 58, row2, display, olc::Pixel(100, 200, 255));
         } else {
-            pmHeld = DrawHudButton(leftCol + 56, row2 - 3, "-");
+            pmHeld = DrawHudButton(leftCol + 56, row2 - 3, "-", IsLocalTurn());
             FillRect(leftCol + 78, row2 - 2, 30, 14, olc::Pixel(20, 15, 10));
             DrawString(leftCol + 80, row2 + 1, std::to_string(t.power), valCol);
-            ppHeld = DrawHudButton(leftCol + 110, row2 - 3, "+");
+            ppHeld = DrawHudButton(leftCol + 110, row2 - 3, "+", IsLocalTurn());
         }
 
         // Moves — [<] remaining [>] click buttons, greyed when budget is exhausted
+        // or it isn't this machine's turn to act.
         // Drawn BEFORE RepeatTick so mlHeld/mrHeld are captured in time this frame
         DrawString(leftCol, row3, "MOVES:", textCol);
-        bool moveDisabled = (t.movesLeft <= 0 || state != GameState::AIM || inputMode != InputMode::NONE);
+        bool moveDisabled = (t.movesLeft <= 0 || state != GameState::AIM ||
+                              inputMode != InputMode::NONE || !IsLocalTurn());
         if (!moveDisabled) {
             mlHeld = DrawHudButton(leftCol + 56, row3 - 3, "<");
             FillRect(leftCol + 78, row3 - 2, 30, 14, olc::Pixel(20, 15, 10));
@@ -2680,7 +2710,7 @@ private:
         }
 
         // Apply all mouse button clicks with repeat throttling
-        if (state == GameState::AIM && inputMode == InputMode::NONE) {
+        if (state == GameState::AIM && inputMode == InputMode::NONE && IsLocalTurn()) {
             bool anyBtnHeld = amHeld || apHeld || pmHeld || ppHeld || mlHeld || mrHeld;
             if (RepeatTick(anyBtnHeld, frameTime, mouseRepeatTimer)) {
                 if (amHeld) t.angle = std::max(0, t.angle - 1);
@@ -2780,40 +2810,40 @@ private:
         int numBoxes = 6, gap = 6;
         int boxW = (rightCol - leftCol - (numBoxes - 1) * gap) / numBoxes;
         int boxH = 24;
-        bool canSelect = (state == GameState::AIM && inputMode == InputMode::NONE);
+        bool canSelect = (state == GameState::AIM && inputMode == InputMode::NONE && IsLocalTurn());
 
         if (DrawWeaponBox(leftCol + 0 * (boxW + gap), row5, boxW, boxH,
-                "NORMAL", 0, true, selectedWeapon == WeaponType::NORMAL, 0) && canSelect)
+                "NORMAL", 0, true, selectedWeapon == WeaponType::NORMAL, 0, canSelect) && canSelect)
             selectedWeapon = WeaponType::NORMAL;
 
         if (DrawWeaponBox(leftCol + 1 * (boxW + gap), row5, boxW, boxH,
-                "HI-EXPLO", t.ammoHE, false, selectedWeapon == WeaponType::HE, 1) && canSelect && t.ammoHE > 0)
+                "HI-EXPLO", t.ammoHE, false, selectedWeapon == WeaponType::HE, 1, canSelect) && canSelect && t.ammoHE > 0)
             selectedWeapon = WeaponType::HE;
 
         if (DrawWeaponBox(leftCol + 2 * (boxW + gap), row5, boxW, boxH,
-                "CLUSTER", t.ammoCluster, false, selectedWeapon == WeaponType::CLUSTER, 2) && canSelect && t.ammoCluster > 0)
+                "CLUSTER", t.ammoCluster, false, selectedWeapon == WeaponType::CLUSTER, 2, canSelect) && canSelect && t.ammoCluster > 0)
             selectedWeapon = WeaponType::CLUSTER;
 
         if (DrawWeaponBox(leftCol + 3 * (boxW + gap), row5, boxW, boxH,
-                "LASER", t.ammoLaser, false, selectedWeapon == WeaponType::LASER, 3) && canSelect && t.ammoLaser > 0)
+                "LASER", t.ammoLaser, false, selectedWeapon == WeaponType::LASER, 3, canSelect) && canSelect && t.ammoLaser > 0)
             selectedWeapon = WeaponType::LASER;
 
         if (DrawWeaponBox(leftCol + 4 * (boxW + gap), row5, boxW, boxH,
-                "BALLISTIC", t.ammoBallistics, false, false, 4) && canSelect && t.ammoBallistics > 0)
+                "BALLISTIC", t.ammoBallistics, false, false, 4, canSelect) && canSelect && t.ammoBallistics > 0)
             UseBallisticsComputer();
 
         if (DrawWeaponBox(leftCol + 5 * (boxW + gap), row5, boxW, boxH,
-                "SHIELD", t.ammoShield, false, false, 5) && canSelect && t.ammoShield > 0)
+                "SHIELD", t.ammoShield, false, false, 5, canSelect) && canSelect && t.ammoShield > 0)
             ActivateShield();
 
         // Plunger fire button and surrender flag — sit in the otherwise empty
         // space above the weapon row, to the right of the score readout
-        if (DrawPlungerButton(rightCol, 86, 95, 50) && canSelect) {
+        if (DrawPlungerButton(rightCol, 86, 95, 50, canSelect) && canSelect) {
             PlayPlungerSound();
             Fire();
         }
 
-        if (DrawFlagButton(rightCol + 100, 86, 95, 50) && canSelect) {
+        if (DrawFlagButton(rightCol + 100, 86, 95, 50, canSelect) && canSelect) {
             SurrenderMatch();
         }
     }
@@ -2983,9 +3013,9 @@ private:
     }
 
     bool DrawWeaponBox(int x, int y, int w, int h, const std::string& label,
-                        int ammo, bool infinite, bool selected, int icon) {
-        bool disabled = !infinite && ammo <= 0;
-        bool hovering = GetMouseX() >= x && GetMouseX() < x + w
+                        int ammo, bool infinite, bool selected, int icon, bool enabled = true) {
+        bool disabled = (!infinite && ammo <= 0) || !enabled;
+        bool hovering = !disabled && GetMouseX() >= x && GetMouseX() < x + w
                      && GetMouseY() >= y && GetMouseY() < y + h;
 
         olc::Pixel bg = disabled ? olc::Pixel(40, 40, 40)
@@ -3010,37 +3040,37 @@ private:
 
     // Detonator-style plunger button — pushes down visually while held,
     // fires the current weapon on release. Returns true on click.
-    bool DrawPlungerButton(int x, int y, int w, int h) {
-        bool hovering = GetMouseX() >= x && GetMouseX() < x + w
+    bool DrawPlungerButton(int x, int y, int w, int h, bool enabled = true) {
+        bool hovering = enabled && GetMouseX() >= x && GetMouseX() < x + w
                      && GetMouseY() >= y && GetMouseY() < y + h;
         bool held = hovering && GetMouse(0).bHeld;
 
-        FillRect(x, y, w, h, olc::Pixel(80, 55, 30));
+        FillRect(x, y, w, h, enabled ? olc::Pixel(80, 55, 30) : olc::Pixel(45, 40, 32));
         DrawRect(x, y, w - 1, h - 1, olc::Pixel(160, 120, 70));
-        DrawString(x + 4, y + 2, "FIRE", olc::Pixel(220, 200, 180));
+        DrawString(x + 4, y + 2, "FIRE", enabled ? olc::Pixel(220, 200, 180) : olc::Pixel(110, 100, 90));
 
         int cx = x + w / 2;
         int baseY = y + h - 10;
-        FillCircle(cx, baseY, 11, olc::Pixel(170, 170, 170));
+        FillCircle(cx, baseY, 11, enabled ? olc::Pixel(170, 170, 170) : olc::Pixel(110, 110, 110));
         DrawCircle(cx, baseY, 11, olc::Pixel(90, 90, 90));
 
         int handleY = held ? baseY - 6 : baseY - 16;
         DrawLine(cx, baseY - 2, cx, handleY, olc::Pixel(50, 50, 50));
         DrawLine(cx + 1, baseY - 2, cx + 1, handleY, olc::Pixel(50, 50, 50));
-        FillCircle(cx, handleY, 9, olc::Pixel(180, 20, 20));
-        FillCircle(cx - 2, handleY - 2, 4, olc::Pixel(230, 60, 60));
+        FillCircle(cx, handleY, 9, enabled ? olc::Pixel(180, 20, 20) : olc::Pixel(120, 60, 60));
+        if (enabled) FillCircle(cx - 2, handleY - 2, 4, olc::Pixel(230, 60, 60));
 
         return hovering && GetMouse(0).bPressed;
     }
 
     // White flag surrender button. Returns true on click.
-    bool DrawFlagButton(int x, int y, int w, int h) {
-        bool hovering = GetMouseX() >= x && GetMouseX() < x + w
+    bool DrawFlagButton(int x, int y, int w, int h, bool enabled = true) {
+        bool hovering = enabled && GetMouseX() >= x && GetMouseX() < x + w
                      && GetMouseY() >= y && GetMouseY() < y + h;
 
-        FillRect(x, y, w, h, hovering ? olc::Pixel(100, 70, 40) : olc::Pixel(80, 55, 30));
+        FillRect(x, y, w, h, !enabled ? olc::Pixel(45, 40, 32) : hovering ? olc::Pixel(100, 70, 40) : olc::Pixel(80, 55, 30));
         DrawRect(x, y, w - 1, h - 1, olc::Pixel(160, 120, 70));
-        DrawString(x + 4, y + 2, "SURRENDER", olc::Pixel(220, 200, 180));
+        DrawString(x + 4, y + 2, "SURRENDER", enabled ? olc::Pixel(220, 200, 180) : olc::Pixel(110, 100, 90));
 
         int poleX = x + w / 2 - 4;
         int poleTop = y + 14;
@@ -3161,6 +3191,7 @@ private:
             }
         }
         DrawNetErrorBanner();
+        DrawWeakConnectionBanner();
     }
 
     // Lobby keyboard input — handles both the name field and the game-code field
@@ -3234,6 +3265,22 @@ private:
         FillRect(bx, by, bw, 20, olc::Pixel(60, 10, 10));
         DrawRect(bx, by, bw, 20, olc::Pixel(200, 60, 60));
         DrawString(bx + 8, by + 6, netError, olc::Pixel(255, 160, 160));
+    }
+
+    // Shown once the peer has been silent past a bit more than one heartbeat
+    // cycle — matches the thresholds NetUpdate() already logs (kafkatanx.log),
+    // so the player sees *something* during a stretch of silence instead of
+    // the screen just looking frozen for the full NET_DISCONNECT_TIMEOUT_S
+    // before the hard "Connection Lost" cutover.
+    void DrawWeakConnectionBanner() {
+        if (!netConnected || netPeerSilence < NET_HEARTBEAT_INTERVAL_S * 1.5f) return;
+        std::string msg = "Weak connection...";
+        int bw = (int)msg.length() * 8 + 20;
+        int bx = SCREEN_W / 2 - bw / 2, by = 4;
+        float pulse = (sin(stateTimer * 4.0f) + 1.0f) * 0.5f;
+        FillRect(bx, by, bw, 20, olc::Pixel(60, 50, 10));
+        DrawRect(bx, by, bw, 20, olc::Pixel(220, 180, 60));
+        DrawString(bx + 8, by + 6, msg, olc::Pixel(255, 220, (int)(80 + 100 * pulse)));
     }
 
     // Shown when NetUpdate() hasn't heard from the peer in NET_DISCONNECT_TIMEOUT_S —
@@ -3686,6 +3733,7 @@ private:
                 DrawSmokeEffect(tanks[i]);
             }
         }
+        if (tanks[currentPlayer].hp > 0) DrawTurnArrow(currentPlayer);
 
         if (state == GameState::AIM) {
             DrawAimGuide();
@@ -3701,6 +3749,7 @@ private:
         DrawPickupMessage();
         DrawUI();
         DrawNetErrorBanner();
+        DrawWeakConnectionBanner();
 
         // Overlay "Waiting for..." when it's the remote player's turn or we're awaiting result
         if (!IsLocalTurn() || waitForResult) {
