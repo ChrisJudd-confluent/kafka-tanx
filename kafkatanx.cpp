@@ -87,6 +87,10 @@ constexpr int BARREL_LENGTH = 16;
 constexpr int MAX_POWER = 100;
 // startingHP and moveBudget are now configurable in GameSettings below
 
+// Demo Mode: total turns (both tanks combined) before a round is forced to
+// end, higher-HP tank wins. 10 = 5 shots each.
+constexpr int DEMO_MODE_MAX_TURNS = 10;
+
 // Liveness: send a PING this often; declare the peer gone if nothing at all
 // (game traffic or PING) has arrived for this long.
 // Timeout was 15s, widened to 25s after a live demo saw 3 dropped connections
@@ -142,6 +146,11 @@ struct GameSettings {
     int landscapeSetting = 2;  // 0=Mountains, 1=Foothills, 2=Random
     int roundsToWin = 3;       // 1, 3, 5, or 7
     bool nightMode = false;    // darkness + lightning + NVG pickups
+    // On by default — caps a round at DEMO_MODE_MAX_TURNS total turns (both
+    // tanks combined) so demo games stay short; whoever has more HP when the
+    // cap is hit wins the round. Aimed at conference/demo settings where the
+    // point is to get through a match quickly and talk about the tech.
+    bool demoMode = true;
 
     // Per-match gameplay values (configurable from the menu)
     int startingHP = 3;         // 1-5
@@ -302,6 +311,13 @@ private:
     bool surrendered = false; // true while the GAME_OVER screen is showing a surrender result
     bool drawGame = false;    // true when both tanks die simultaneously or a round times out
     int turnsSinceHit = 0;    // stalemate counter: increments each turn; resets on any hit
+    int demoTurnCount = 0;    // Demo Mode: total turns this round (both tanks); never resets on hit
+    // Demo Mode can end a round with both tanks still alive (turn cap hit,
+    // higher HP wins) — the usual "loser's hp==0" trick DrawGameOverScreen()
+    // uses to infer the winner doesn't apply, so this is set explicitly only
+    // by that ending path. -1 otherwise (every other ending path still infers
+    // the winner from HP as before).
+    int demoCapWinner = -1;
 
     // -- Networking (Kafka) --
     KafkaConfig   kafkaConfig;                  // loaded from client-kafka.ini in OnUserCreate
@@ -962,6 +978,7 @@ private:
         b.writeU8((uint8_t)settings.startAmmoLaser); b.writeU8((uint8_t)settings.startAmmoBallistics);
         b.writeU8((uint8_t)settings.startAmmoShield);
         b.writeU8(settings.nightMode ? 1 : 0);
+        b.writeU8(settings.demoMode ? 1 : 0);
         NetSend(NetMsg::MATCH_START, b.data);
     }
 
@@ -1049,6 +1066,7 @@ private:
             settings.startAmmoLaser = r.readU8(); settings.startAmmoBallistics = r.readU8();
             settings.startAmmoShield = r.readU8();
             settings.nightMode = (r.readU8() != 0);
+            settings.demoMode = (r.readU8() != 0);
             tanks[0].score = 0; tanks[1].score = 0;
             break;
         }
@@ -1081,7 +1099,7 @@ private:
             projectiles.clear(); explosions.clear(); laserTrail.clear();
             selectedWeapon = WeaponType::NORMAL; reticleActive = false;
             currentPlayer = 0; inputMode = InputMode::NONE; inputBuffer.clear();
-            drawGame = false; turnsSinceHit = 0; surrendered = false;
+            drawGame = false; turnsSinceHit = 0; demoTurnCount = 0; demoCapWinner = -1; surrendered = false;
             // Read the HOST's pickup state directly — do NOT call SpawnPickup()
             // here as it uses rand() and would produce a different position/type.
             pickup.active = r.readU8() != 0;
@@ -1304,6 +1322,8 @@ private:
         inputBuffer.clear();
         drawGame = false;
         turnsSinceHit = 0;
+        demoTurnCount = 0;
+        demoCapWinner = -1;
 
         pickup.active = false;
         pickupRespawnTimer = 0;
@@ -2036,11 +2056,14 @@ private:
             }
             y += lH + 10;
 
-            // Night mode toggle
-            DrawWoodPanel(c1, y, c1w, 30);
+            // Night mode / Demo Mode toggles
+            DrawWoodPanel(c1, y, c1w, 58);
             if (DrawMenuOption(c1+8, y+8, c1w-14, "Night Mode",
                     settings.nightMode, olc::Pixel(80,180,255)))
                 settings.nightMode = !settings.nightMode;
+            if (DrawMenuOption(c1+8, y+36, c1w-14, "Demo Mode",
+                    settings.demoMode, olc::Pixel(255,200,80)))
+                settings.demoMode = !settings.demoMode;
         }
 
         // ── Column 2: Gravity / Rounds to Win ────────────────────────────────
@@ -2084,6 +2107,15 @@ private:
             DrawMenuSpinner(c3, r, c3w, "Laser",      settings.startAmmoLaser,     0, 9);             r+=20;
             DrawMenuSpinner(c3, r, c3w, "Ballistic",  settings.startAmmoBallistics,0, 9);             r+=20;
             DrawMenuSpinner(c3, r, c3w, "Shield",     settings.startAmmoShield,    0, 9);             r+=20;
+
+            // Logo, centered in the empty space below the settings panel
+            if (titleLogoLoaded) {
+                olc::Sprite* s = titleLogo.Sprite();
+                float scale = std::min(c3w - 20, 220) / (float)s->width;
+                olc::vf2d center = { (float)s->width / 2.0f, (float)s->height / 2.0f };
+                olc::vf2d pos = { (float)c3 + c3w / 2.0f, (float)(settY + gsH) + 20.0f + (s->height * scale) / 2.0f };
+                DrawRotatedDecal(pos, titleLogo.Decal(), 0.0f, center, { scale, scale });
+            }
         }
 
         // ── Quick guide (full width) ─────────────────────────────────────────
@@ -3294,9 +3326,12 @@ private:
     }
 
     void DrawGameOverScreen() {
-        // Determine winner safely — if both are dead it's a draw
+        // Determine winner safely — if both are dead it's a draw. Demo Mode's
+        // turn-cap ending is the one case where a round ends with both tanks
+        // still alive, so it can't be inferred from hp==0 like every other
+        // ending path — demoCapWinner carries that decision explicitly instead.
         int winner = (tanks[0].hp <= 0 && tanks[1].hp > 0) ? 1 :
-                     (tanks[1].hp <= 0 && tanks[0].hp > 0) ? 0 : -1;
+                     (tanks[1].hp <= 0 && tanks[0].hp > 0) ? 0 : demoCapWinner;
         bool matchOver = (winner >= 0 && tanks[winner].score >= settings.roundsToWin);
 
         FillRect(SCREEN_W / 2 - 200, SCREEN_H / 2 - 80, 400, 160, olc::Pixel(0, 0, 0, 200));
@@ -3304,8 +3339,11 @@ private:
 
         if (drawGame) {
             DrawString(SCREEN_W / 2 - 72, SCREEN_H / 2 - 60, "IT'S A DRAW!", olc::Pixel(200, 200, 100), 2);
-            DrawString(SCREEN_W / 2 - 80, SCREEN_H / 2 - 30,
-                turnsSinceHit >= 30 ? "30 turns without a hit" : "Both tanks destroyed!",
+            std::string reason = (turnsSinceHit >= 30) ? "30 turns without a hit"
+                                : (settings.demoMode && demoTurnCount >= DEMO_MODE_MAX_TURNS)
+                                    ? "Demo Mode turn limit - equal HP"
+                                    : "Both tanks destroyed!";
+            DrawString(SCREEN_W / 2 - 80, SCREEN_H / 2 - 30, reason,
                 olc::Pixel(180, 180, 180));
         } else if (surrendered) {
             std::string loseText = settings.playerNames[1 - winner] + " SURRENDERED";
@@ -3709,6 +3747,36 @@ private:
                     return true;
                 }
 
+                // Demo Mode: force the round to end after DEMO_MODE_MAX_TURNS
+                // total turns so demo games stay short — higher HP wins the
+                // round (equal HP = draw). Both machines compute this
+                // identically from tanks[].hp, already synced via TURN_RESULT,
+                // the same pattern the stalemate check above uses.
+                demoTurnCount++;
+                if (settings.demoMode) {
+                    int remaining = DEMO_MODE_MAX_TURNS - demoTurnCount;
+                    if (remaining > 0) {
+                        ShowPickupMessage(std::to_string(remaining) + " shot" +
+                            (remaining == 1 ? "" : "s") + " left (Demo Mode)");
+                    } else {
+                        if (tanks[0].hp == tanks[1].hp) {
+                            drawGame = true;
+                            if (netMode == NetMode::HOST) PublishRoundAnalytics("", "", "STALEMATE");
+                        } else {
+                            int w = (tanks[0].hp > tanks[1].hp) ? 0 : 1;
+                            if (!surrendered) tanks[w].score++;
+                            demoCapWinner = w; // both tanks are still alive — DrawGameOverScreen()
+                                               // can't infer the winner from hp==0 here like it
+                                               // does for every other ending path
+                            if (netMode == NetMode::HOST)
+                                PublishRoundAnalytics(PlayerIdForTank(w), settings.playerNames[w], "");
+                        }
+                        state = GameState::GAME_OVER;
+                        stateTimer = 0;
+                        return true;
+                    }
+                }
+
                 state = GameState::AIM;
                 stateTimer = 0;
             }
@@ -3766,9 +3834,11 @@ private:
         if (state == GameState::GAME_OVER) {
             DrawGameOverScreen();
             if (GetKey(olc::Key::SPACE).bPressed && stateTimer > 1.0f) {
-                // Determine if the match is truly over (a winner has enough round wins)
+                // Determine if the match is truly over (a winner has enough round wins).
+                // Falls back to demoCapWinner for a Demo Mode turn-cap ending, where
+                // both tanks are still alive so hp can't tell us who won the round.
                 int winner = (tanks[0].hp > 0 && tanks[1].hp <= 0) ? 0 :
-                             (tanks[1].hp > 0 && tanks[0].hp <= 0) ? 1 : -1;
+                             (tanks[1].hp > 0 && tanks[0].hp <= 0) ? 1 : demoCapWinner;
                 bool matchOver = (winner >= 0 && tanks[winner].score >= settings.roundsToWin);
 
                 if (!drawGame && matchOver) {
