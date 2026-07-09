@@ -150,6 +150,16 @@ public:
         if (event.type() == RdKafka::Event::EVENT_ERROR) {
             *errorSink_ = "Kafka connection error: " + RdKafka::err2str(event.err());
             NetLog::Write("EVENT_ERROR " + RdKafka::err2str(event.err()) + ": " + event.str());
+        } else if (event.type() == RdKafka::Event::EVENT_STATS) {
+            // Raw internal-metrics JSON (broker connection states, per-partition
+            // fetch/produce state, consumer lag, rebalance age, ...) — logged
+            // verbatim rather than parsed, since two real disconnects in a row
+            // showed silence on both sides with zero EVENT_ERROR and no
+            // rebalance either, meaning something below our current visibility
+            // (a broker-side hiccup on the data path that doesn't surface as an
+            // app-level error) is the likely culprit. This is the next level
+            // down when that happens again.
+            NetLog::Write("STATS: " + event.str());
         }
     }
 private:
@@ -211,7 +221,11 @@ static RdKafka::Conf* MakeBaseConf(const KafkaConfig& cfg, std::string& err,
         // 30-60s, which the lobby screen's mostly-idle wait easily exceeds.
         // Without keepalives the dead connection isn't noticed until a real
         // request times out (~60s later), which reads as a silent "no ack".
-        !set("socket.keepalive.enable", "true")) {
+        !set("socket.keepalive.enable", "true")            ||
+        // Periodic internal-metrics dump (broker states, fetch/produce queues,
+        // consumer lag) surfaced via EVENT_STATS in KafkaEventCb — see there
+        // for why this was added.
+        !set("statistics.interval.ms", "15000")) {
         delete conf;
         return nullptr;
     }
